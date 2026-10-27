@@ -15,8 +15,9 @@ Any ESP8266 board with 4 MB flash (NodeMCU v2/v3, Wemos D1 mini). Power it from 
 router's USB port or a phone charger and leave it running.
 
 Flash layout (`eagle.flash.4m3m.ld`): 1 MB sketch + 3 MB LittleFS, room for about 600k
-domains. Firmware OTA works while the firmware fits in the free half of the sketch area.
-It is about 507 KB now. If OTA refuses a bigger build, flash it over USB.
+domains. A firmware update over WiFi stages the new image next to the running one, so the
+firmware must stay under ~515 KB (it is ~509 KB). If an update is refused as too big, flash
+it over USB.
 
 ## Build & flash
 
@@ -29,6 +30,15 @@ pio device monitor
 ```
 
 `data/custom.txt` (one domain per line, optional) seeds the custom block list.
+
+After the first USB flash, everything updates over WiFi from the dashboard:
+
+- **Firmware:** `pio run`, then upload `.pio/build/nodemcuv2/firmware.bin` in
+  *Settings → Firmware*. Settings, lists and WiFi are kept.
+- **Blocklist:** build a new `blocklist.bin` and upload it in *Settings → Blocklist*.
+
+The dashboard login is user `admin` (`WEB_USER`) and the `WEB_PASS` from `src/secrets.h`.
+To change it, edit `secrets.h`, rebuild, and upload the new firmware.
 
 ## Family preset (what the board runs)
 
@@ -45,7 +55,7 @@ python3 tools/build_blocklist.py data/blocklist.bin \
   https://raw.githubusercontent.com/Perflyst/PiHoleBlocklist/master/android-tracking.txt
 ```
 
-Upload the result from the dashboard (*Settings → Upload a new blocklist*) or with
+Upload the result from the dashboard (*Settings → Blocklist → Upload*) or with
 `pio run -t uploadfs`. Don't set the *Automatic blocklist update* URL to upstream's release
 asset while using this preset: it would replace the list with upstream's smaller one.
 
@@ -90,18 +100,35 @@ light/dark mode. Five tabs:
 - **Settings:** address, WiFi, memory, uptime, blocklist upload and auto-update, firmware
   update, forget WiFi
 
-Changes ask for the dashboard password (`WEB_USER` / `WEB_PASS` in `secrets.h`).
+Changes and the Activity tab ask for the dashboard password (user `admin`, password
+`WEB_PASS` from `secrets.h`). The browser's *"password will be sent unencrypted"* note is
+normal for a box without HTTPS: the password only travels inside the home network.
+
+Notes on Devices:
+
+- A device appears after its first lookup since the box last restarted; a sleeping phone
+  can take a while.
+- Phones that just got the new DNS from the router only switch when they reconnect to WiFi
+  or renew their lease (up to the router's lease time, often 1 day).
+- iPhones and Android phones don't announce a name, so they show as "Apple device" or
+  "Android" until you rename them. Phones that rotate their private WiFi address show up as
+  a new device and lose that name; set *Private Wi-Fi Address* to **Fixed** (iPhone) or
+  *MAC address type* to **Phone MAC** (Android) on the home network to keep them stable.
 
 ## Memory
 
 The ESP8266 has about 80 KB of RAM, so the firmware keeps the heap steady for 24/7 use:
 
-- `/stats.json` is streamed in 256-byte chunks instead of built as one big `String`
+- `/stats.json` and `/log.json` are streamed in 256-byte chunks instead of built as one big
+  `String`
 - custom and allow lists keep only 64-bit hashes in RAM; the names stay in LittleFS
 - the setup portal, log messages and HTTP replies live in flash (`PROGMEM` / `F()`)
+- the Activity log is a fixed 64-entry ring (~3.3 KB)
+- device names are collected in 90-second mDNS bursts (at boot, when a new device appears,
+  and every 30 min) because the mDNS library caches every answer while a query is installed
 
-About 31 KB stays free with ~550k domains loaded. *Settings → Memory* shows free heap and
-how much of it is in one piece.
+About 26 KB stays free with ~550k domains loaded (about 22 KB during a name burst).
+*Settings → Memory* shows free heap and how much of it is in one piece.
 
 ## Running 24/7
 
@@ -112,7 +139,8 @@ how much of it is in one piece.
 - **Memory:** it reboots itself if free heap drops below 6 KB.
 - *Last restart* under Settings shows why it last restarted.
 
-Stats reset on every restart. The blocklist, custom domains and banned devices are kept.
+Stats, the Devices list and the Activity log start empty after every restart. The
+blocklist, custom and allowed sites, scam switches and blocked devices are kept.
 
 ## WiFi setup
 
@@ -125,15 +153,33 @@ To forget WiFi, press **FLASH** (GPIO0) within 3 s of boot while the LED blinks,
 
 ## Make the whole home use it
 
-1. In the router's DHCP settings, set DNS to the board's IP. Give the board a fixed IP
-   (DHCP reservation) first.
+1. Give the board a fixed IP (DHCP reservation for its MAC), then in the router's
+   **LAN / DHCP** settings set the primary DNS to the board's IP and leave the secondary
+   empty (a second resolver lets devices skip the board). Don't change the WAN DNS: then
+   every lookup comes from the router and the Devices list shows only one device.
+   No router reset is needed; devices switch when they reconnect.
 2. Turn off browser *Secure DNS* (Chrome/Edge/Firefox/Brave) and Android *Private DNS*.
    Otherwise those devices skip the board.
 3. Test: `dig @<board-ip> doubleclick.net` should return `0.0.0.0`.
 
+If the board is unplugged or broken, devices can't look up any site. To go back, clear the
+DNS fields in the router's DHCP settings and reconnect the devices.
+
 DNS can't remove ads inside YouTube, Facebook, Instagram, TikTok, LINE, or the Shopee/Lazada
 apps (they come from the same servers as the content). It also doesn't cover phones on
 mobile data or using a VPN.
+
+## Troubleshooting
+
+- **A site or app breaks:** press *Pause 5 min*. If it works while paused, find the blocked
+  host in *Activity* (filter *Blocked*) and press *Allow*. Some sites need their own ad
+  scripts to work; for example pantip's comments need `frukt.pantip.com`.
+- **Ads still show:** the browser may use its own *Secure DNS*, or the ads come from the
+  site's own domain. Find the ad host in *Activity* and press *Block*, or add a browser
+  blocker such as uBlock Origin for in-page ads.
+- **Devices missing:** see the notes under *Dashboard*.
+- **Firmware update refused:** the build is over ~515 KB; flash over USB with
+  `pio run -t upload`.
 
 ## Differences from the C3 version
 
@@ -146,6 +192,11 @@ mobile data or using a VPN.
 | Forget-WiFi button | hold BOOT at power-on | press FLASH within 3 s after boot |
 | SafeSearch | no | Google, YouTube, Bing |
 | Self-healing reboot | no | WiFi down 2 min / low heap |
+| Scam protection | no | remote-control apps, fake Thai bank/government sites |
+| Allow list | no | overrides every block |
+| Device names / type | no | Bonjour names + OS from lookups |
+| Activity log | no | last 64 lookups, password-protected |
+| Firmware update | dashboard + ArduinoOTA | dashboard only (keeps the image under ~515 KB) |
 | Hostname | c3adblock.local | adblock.local |
 
 ## License
