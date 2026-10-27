@@ -18,7 +18,7 @@ header b{font-size:18px;letter-spacing:-.01em}
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--mut)}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}.off .dot{background:var(--warn)}.err .dot{background:var(--bad)}
 nav{display:flex;background:var(--soft);border-radius:12px;padding:3px;margin-bottom:20px;position:sticky;top:8px;z-index:5}
-nav button{flex:1;border:0;background:none;color:var(--mut);font:inherit;font-size:14px;padding:8px 0;border-radius:9px;cursor:pointer}
+nav button{flex:1;min-width:0;border:0;background:none;color:var(--mut);font:inherit;font-size:13.5px;padding:8px 0;border-radius:9px;cursor:pointer}
 nav button.on{background:var(--card);color:var(--fg);font-weight:600;box-shadow:0 1px 2px #0000000f}
 section[data-tab]{display:none}section.on{display:block}
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:4px 16px;margin-bottom:14px}
@@ -51,7 +51,12 @@ input.tx{flex:1;min-width:0;font:inherit;padding:10px 12px;border:1px solid var(
 input.tx:focus{outline:2px solid var(--fg);outline-offset:-1px}
 .seg{display:inline-flex;background:var(--soft);border-radius:10px;padding:3px;margin:4px 0 2px}
 .seg button{border:0;background:none;font:inherit;font-size:13px;color:var(--mut);padding:5px 12px;border-radius:7px;cursor:pointer}.seg button.on{background:var(--card);color:var(--fg);font-weight:600}
+select.tx{flex:1;min-width:0;font:inherit;font-size:14px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg)}
+.bar2{display:flex;gap:8px;align-items:center;margin-bottom:10px}.bar2 .seg{margin:0}
+.st1,.st2{display:inline-block;white-space:nowrap;font-size:11px;font-weight:600;color:var(--bad);background:var(--badbg);border-radius:6px;padding:1px 6px;margin-left:6px}
 .empty{color:var(--mut);font-size:14px;padding:16px 0;text-align:center}
+.ico{flex:none;width:36px;height:36px;border-radius:10px;background:var(--soft);display:grid;place-items:center;color:var(--mut)}
+.ico svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 .name{border:0;background:none;color:inherit;font:inherit;font-weight:600;padding:0;cursor:pointer;text-align:left}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;padding:14px 0;font-size:14px}.kv span:nth-child(odd){color:var(--mut)}.kv span:nth-child(even){text-align:right;overflow-wrap:anywhere}
 .alert{background:var(--badbg);color:var(--bad);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13.5px;display:none}
@@ -62,7 +67,7 @@ input[type=file]{font-size:13px;flex:1;min-width:0;width:0;color:var(--mut)}
 </style></head><body><div class=wrap>
 <header><b>AdBlock</b><span class=pill id=pill><span class=dot></span><span id=pillT>&hellip;</span></span></header>
 <div class=alert id=credwarn>Default passwords are in use. Set WEB_PASS in secrets.h and reflash.</div>
-<nav id=nav><button data-t=home class=on>Home</button><button data-t=devices>Devices</button><button data-t=sites>Sites</button><button data-t=settings>Settings</button></nav>
+<nav id=nav><button data-t=home class=on>Home</button><button data-t=activity>Activity</button><button data-t=devices>Devices</button><button data-t=sites>Sites</button><button data-t=settings>Settings</button></nav>
 
 <section data-tab=home class=on>
 <div class="card pad"><div class=big id=nBlocked>&ndash;</div><div class="mut sm" id=nSub>requests blocked</div>
@@ -78,6 +83,12 @@ input[type=file]{font-size:13px;flex:1;min-width:0;width:0;color:var(--mut)}
 </div>
 <div id=alertsW style=display:none><div class=lbl>Scams stopped</div><div class=card id=hits></div></div>
 </section>
+
+<section data-tab=activity>
+<div class=bar2><select class=tx id=fDev><option value="">All devices</option></select>
+<div class=seg id=fSeg><button data-f=all class=on>All</button><button data-f=blk>Blocked</button></div></div>
+<div class=card id=logl><div class=empty>Loading&hellip;</div></div>
+<p class="mut sm" style="margin:0 4px">The last 64 sites looked up since the box started. <b>Block</b> blocks that site and all its sub-sites.</p></section>
 
 <section data-tab=devices><div class=card id=devs></div><p class="mut sm" style="margin:0 4px">Tap a name to rename it. Names are saved on this phone or computer.</p></section>
 
@@ -98,7 +109,7 @@ input[type=file]{font-size:13px;flex:1;min-width:0;width:0;color:var(--mut)}
 <div class=lbl>WiFi</div><div class=card><div class=row><div class=t>Forget WiFi<small>Restarts into setup mode</small></div><button class="b r" onclick=forgetWifi()>Forget</button></div></div>
 </section>
 </div><div id=toast></div><script>
-const $=id=>document.getElementById(id),H={'X-Requested-With':'esp-adblock'};let S=null,tt,list='custom';
+const $=id=>document.getElementById(id),H={'X-Requested-With':'esp-adblock'};let S=null,tt,list='custom',cur='home',LOG=null,flt='all',DN={};
 function toast(m){let t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('show'),2400)}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function fmt(n){return Number(n).toLocaleString()}
@@ -119,7 +130,7 @@ if(!r.ok){toast('Failed ('+r.status+')');return false}if(ok)toast(ok);await load
 function names(){try{return JSON.parse(localStorage.getItem('devnames')||'{}')}catch(e){return{}}}
 function setName(mac,n){let m=names();if(n)m[mac]=n;else delete m[mac];try{localStorage.setItem('devnames',JSON.stringify(m))}catch(e){}}
 function tab(t){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t==t));
-document.querySelectorAll('section[data-tab]').forEach(s=>s.classList.toggle('on',s.dataset.tab==t));try{sessionStorage.setItem('tab',t)}catch(e){}}
+document.querySelectorAll('section[data-tab]').forEach(s=>s.classList.toggle('on',s.dataset.tab==t));cur=t;try{sessionStorage.setItem('tab',t)}catch(e){}if(t=='activity')loadLog()}
 $('nav').onclick=e=>{let b=e.target.closest('button');if(b)tab(b.dataset.t)};
 $('sseg').onclick=e=>{let b=e.target.closest('button');if(!b)return;list=b.dataset.s;[...$('sseg').children].forEach(x=>x.classList.toggle('on',x==b));render()};
 function pause(s){api('/pause?s='+s,'Paused for '+dur(s))}
@@ -133,7 +144,7 @@ $('slist').onclick=e=>{let b=e.target.closest('[data-rm]');if(b)api((list=='cust
 $('hits').onclick=e=>{let b=e.target.closest('[data-allow]');if(b&&confirm('Always allow '+uni(b.dataset.allow)+'? Only if you are sure it is real and safe.'))api('/allow?d='+encodeURIComponent(b.dataset.allow),'Allowed')};
 $('devs').onclick=e=>{let b=e.target.closest('[data-ip]');if(b){let on=b.dataset.ban=='1';
 if(on||confirm('Cut this device off the internet?'))api('/ban?ip='+b.dataset.ip,on?'Device allowed':'Device blocked')}
-let n=e.target.closest('[data-mac]');if(n){let v=prompt('Device name',names()[n.dataset.mac]||'');if(v!==null){setName(n.dataset.mac,v.trim());render()}}};
+let n=e.target.closest('[data-mac]');if(n){let v=prompt('Device name (empty = automatic)',names()[n.dataset.mac]||n.dataset.def||'');if(v!==null){setName(n.dataset.mac,v.trim());render()}}};
 $('updf').onsubmit=e=>{e.preventDefault();api('/setupdate?u='+encodeURIComponent($('uurl').value.trim())+'&h='+(parseInt($('uiv').value)||24),'Saved')};
 function forgetWifi(){if(confirm('Forget WiFi and restart into setup mode?'))api('/forgetwifi','Restarting')}
 function upload(form,file,url,bar,done){$(form).onsubmit=e=>{e.preventDefault();let f=$(file).files[0];if(!f){toast('Choose a file');return}
@@ -142,6 +153,24 @@ x.upload.onprogress=e=>{if(e.lengthComputable)i.style.width=(e.loaded/e.total*10
 x.onload=()=>{p.style.display='none';toast(x.status==200?done:'Failed: '+x.responseText);$(file).value='';setTimeout(load,800)};
 x.onerror=()=>{p.style.display='none';toast(url=='/update'?done:'Upload failed')};let d=new FormData();d.append('f',f);x.send(d)}}
 upload('upf','blf','/upload','upp','Blocklist updated');upload('fwf','fwb','/update','fwp','Flashed — reload in 20 s');
+const OS=['','Apple device','iPhone','iPad','Mac','Apple TV','Android','Android TV','Windows PC','Linux','Smart TV','PlayStation','Xbox','Nintendo'];
+const IC={phone:'<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>',tablet:'<rect x="4.5" y="2.5" width="15" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
+laptop:'<rect x="4" y="4.5" width="16" height="11" rx="1.5"/><path d="M2 19.5h20"/>',tv:'<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+game:'<path d="M6 8h12a4 4 0 0 1 4 4v1a3 3 0 0 1-5.4 1.8L15 13H9l-1.6 1.8A3 3 0 0 1 2 13v-1a4 4 0 0 1 4-4z"/><path d="M7 11v2M6 12h2"/>',
+other:'<circle cx="12" cy="12" r="8.5"/><path d="M12 8v4l2.5 2"/>'};
+function icon(os){let k=[2,6].includes(os)?'phone':os==3?'tablet':[4,8,9].includes(os)?'laptop':[5,7,10].includes(os)?'tv':[11,12,13].includes(os)?'game':os==1?'phone':'other';
+return`<span class=ico><svg viewBox="0 0 24 24">${IC[k]}</svg></span>`}
+function devName(ip){return DN[ip]||ip}
+$('fSeg').onclick=e=>{let b=e.target.closest('button');if(!b)return;flt=b.dataset.f;[...$('fSeg').children].forEach(x=>x.classList.toggle('on',x==b));renderLog()};
+$('fDev').onchange=renderLog;
+$('logl').onclick=e=>{let b=e.target.closest('[data-blk]');if(b){let d=b.dataset.blk;if(confirm('Block '+uni(d)+' and its sub-sites?'))api('/addblock?d='+encodeURIComponent(d),'Blocked '+uni(d)).then(loadLog)}
+let a=e.target.closest('[data-alw]');if(a){let d=a.dataset.alw;if(confirm('Always allow '+uni(d)+'?'))api('/allow?d='+encodeURIComponent(d),'Allowed '+uni(d)).then(loadLog)}};
+async function loadLog(){try{let r=await fetch('/log.json',{headers:H,cache:'no-store'});if(r.status==401){$('logl').innerHTML='<div class=empty>Enter the dashboard password to see activity.</div>';return}
+LOG=await r.json();renderLog()}catch(e){}}
+function renderLog(){if(!LOG)return;let dv=$('fDev').value,L=LOG.filter(e=>(!dv||e.ip==dv)&&(flt=='all'||e.s>0));
+$('logl').innerHTML=L.map(e=>{let d=(e.t?'\u2026':'')+uni(e.d),bs=base(e.d);
+return row(esc(d)+(e.s==2?'<span class=st2>Scam</span>':e.s==1?'<span class=st1>Blocked</span>':''),esc(devName(e.ip))+' \u00b7 '+ago(e.ago)+(e.n>1?' \u00b7 '+e.n+'\u00d7':''),
+e.s?`<button class="b lnk" data-alw="${esc(bs)}">Allow</button>`:`<button class="b lnk" data-blk="${esc(bs)}">Block</button>`)}).join('')||'<div class=empty>Nothing yet.</div>'}
 function row(t,sub,btn){return`<div class=row><div class=t>${t}${sub?`<small>${sub}</small>`:''}</div>${btn||''}</div>`}
 function render(){if(!S)return;let s=S,on=s.blocking!==false,total=s.blocked+s.allowed,nm=names(),sc=s.scam||{hits:[]};
 $('pill').className='pill'+(on?'':' off');$('pillT').textContent=on?'Protected':'Paused';
@@ -152,11 +181,13 @@ $('nBlocked').textContent=fmt(s.blocked);$('nSub').textContent='requests blocked
 $('nDev').textContent=s.clients.length;$('nDom').textContent=short(s.domains);$('nUp').textContent=dur(s.up);
 $('pList').textContent=fmt(s.domains)+' sites on the blocklist';
 $('tRemote').checked=!!sc.remote;$('tBank').checked=!!sc.bank;
-let cs=s.clients.slice().sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a.allowed)),ipn={};cs.forEach(c=>ipn[c.ip]=nm[c.mac]||c.ip);
+let cs=s.clients.slice().sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a.allowed)),ipn=DN={};cs.forEach(c=>DN[c.ip]=nm[c.mac]||c.name||(OS[c.os]?OS[c.os]+' \u00b7 '+c.ip.split('.').pop():c.ip));
+let fd=$('fDev'),fv=fd.value,opts='<option value="">All devices</option>'+cs.map(c=>`<option value="${esc(c.ip)}">${esc(DN[c.ip])}</option>`).join('');if(fd.dataset.o!=opts){fd.innerHTML=opts;fd.value=fv;fd.dataset.o=opts}
 $('alertsW').style.display=sc.hits.length?'':'none';
 $('hits').innerHTML=sc.hits.map(h=>row(esc(uni(h.d)),`<b class=k${h.k}>${h.k==1?'Remote-control app':'Fake bank site'}</b> · ${esc(ipn[h.ip]||h.ip)} · ${ago(h.ago)}`,`<button class="b lnk" data-allow="${esc(base(h.d))}">Allow</button>`)).join('');
-$('devs').innerHTML=cs.map(c=>{let t=c.blocked+c.allowed,pc=t?Math.round(c.blocked*100/t):0,n=nm[c.mac];
-return`<div class=row><div class=t><button class=name data-mac="${esc(c.mac)}">${esc(n||c.ip)}</button>${c.banned?'<span class=tag>Blocked</span>':''}<small>${n?esc(c.ip)+' · ':''}${fmt(c.blocked)} of ${fmt(t)} blocked</small><div class=bar><i style="width:${pc}%"></i></div></div>
+$('devs').innerHTML=cs.map(c=>{let t=c.blocked+c.allowed,pc=t?Math.round(c.blocked*100/t):0,my=nm[c.mac],os=OS[c.os]||'',title=my||c.name||os||c.ip;
+let sub=[title!=os&&os,title!=c.ip&&c.ip,fmt(c.blocked)+' of '+fmt(t)+' blocked'].filter(Boolean).join(' \u00b7 ');
+return`<div class=row>${icon(c.os)}<div class=t><button class=name data-mac="${esc(c.mac)}" data-def="${esc(c.name||'')}">${esc(title)}</button>${c.banned?'<span class=tag>Blocked</span>':''}<small>${esc(sub)}</small><div class=bar><i style="width:${pc}%"></i></div></div>
 <button class="b${c.banned?'':' lnk'}" data-ip="${esc(c.ip)}" data-ban="${c.banned?1:0}">${c.banned?'Unblock':'Block'}</button></div>`}).join('')||'<div class=empty>No devices yet. Set your router\'s DNS to '+esc(s.ip)+'.</div>';
 let L=s[list]||[];[...$('sseg').children].forEach(b=>b.textContent=(b.dataset.s=='custom'?'Blocked':'Always allowed')+' '+(s[b.dataset.s]||[]).length);
 $('slist').innerHTML=L.map(d=>row(esc(uni(d)),uni(d)!=d?esc(d):'',`<button class="b lnk" data-rm="${esc(d)}">Remove</button>`)).join('')||'<div class=empty>Nothing here yet.</div>';
@@ -168,5 +199,5 @@ async function load(){try{let r=await fetch('/stats.json',{cache:'no-store'});S=
 if(!document.body.classList.contains('ready'))setTimeout(()=>document.body.classList.add('ready'),500)}
 catch(e){$('pill').className='pill err';$('pillT').textContent='Offline'}}
 try{let t=sessionStorage.getItem('tab');if(t)tab(t)}catch(e){}
-load();setInterval(()=>{if(!document.hidden)load()},3000);
+load();setInterval(()=>{if(!document.hidden){load();if(cur=='activity')loadLog()}},3000);
 </script></body></html>)HTML";

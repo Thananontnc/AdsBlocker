@@ -19,7 +19,6 @@
 #include <Updater.h>           // firmware OTA
 #include <ESP8266HTTPClient.h> // remote blocklist fetch
 #include <WiFiClientSecure.h>  // https fetch (BearSSL)
-#include <ArduinoOTA.h>        // network firmware flashing (pio run over wifi)
 #include <DNSServer.h>         // captive-portal catch-all DNS
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
@@ -59,7 +58,7 @@ static uint8_t cacheKey[CACHE_SIZE][HASH_BYTES];
 static uint8_t cacheState[CACHE_SIZE];   // 0 = empty, 1 = not listed, 2 = listed
 static uint8_t rangeBuf[MAX_RANGE * HASH_BYTES];
 
-struct Dev { uint32_t ip; uint8_t mac[6]; bool banned; uint32_t blocked, allowed; };
+struct Dev { uint32_t ip; uint8_t mac[6]; bool banned; uint8_t os; uint32_t blocked, allowed; };   // os: see OS_* below
 static const int MAX_CLIENTS = 32;
 Dev clients[MAX_CLIENTS]; int numClients = 0;
 
@@ -363,14 +362,139 @@ static void getMac(uint32_t ip, uint8_t* mac) {
   for (struct netif* nif = netif_list; nif; nif = nif->next)
     if (etharp_find_addr(nif, &ipa, &eth, &ipret) >= 0 && eth) { memcpy(mac, eth->addr, 6); return; }
 }
+static void noteNewDevice(uint32_t ip);
 static Dev* getClient(uint32_t ip) {
   for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) return &clients[i];
   if (numClients < MAX_CLIENTS) {
     Dev* c = &clients[numClients++];
-    c->ip = ip; c->blocked = c->allowed = 0; c->banned = isBannedIP(ip);
+    c->ip = ip; c->blocked = c->allowed = 0; c->banned = isBannedIP(ip); c->os = 0;
+    noteNewDevice(ip);
     getMac(ip, c->mac); return c;
   }
   return nullptr;
+}
+
+// ---------- device recognition ----------
+// Two passive sources, no probing:
+//  - names: Apple devices and TVs announce themselves over mDNS/Bonjour ("iPad ของ Thananon",
+//    a TV's room name, its model); background service queries collect them per IP
+//  - type: each OS looks up tell-tale hosts (Apple's, Google's Android connectivity check,
+//    Microsoft's, TV makers'), so the domains a device queries reveal what it is
+enum : uint8_t { OS_NONE, OS_APPLE, OS_IPHONE, OS_IPAD, OS_MAC, OS_APPLETV, OS_ANDROID, OS_ANDROIDTV,
+                 OS_WINDOWS, OS_LINUX, OS_SMARTTV, OS_PLAYSTATION, OS_XBOX, OS_NINTENDO };
+static uint8_t osRank(uint8_t os) {               // generic guesses can be refined by specific ones
+  return os == OS_NONE ? 0 : (os == OS_APPLE || os == OS_ANDROID || os == OS_WINDOWS || os == OS_LINUX) ? 1 : 2;
+}
+// "suffix:type" pairs (type = OS_* number)
+static const char OS_HINTS[] PROGMEM =
+  "apple.com:1 icloud.com:1 mzstatic.com:1 swscan.apple.com:4 "
+  "connectivitycheck.gstatic.com:6 android.clients.google.com:6 androidtvchannels-pa.googleapis.com:7 "
+  "msftconnecttest.com:8 msftncsi.com:8 windowsupdate.com:8 "
+  "connectivity-check.ubuntu.com:9 nmcheck.gnome.org:9 "
+  "tclclouds.com:10 samsungcloudsolution.com:10 samsungacr.com:10 lgtvsdp.com:10 lgsmartad.com:10 "
+  "playstation.net:11 xboxlive.com:12 nintendo.net:13";
+static bool endsWithDomain(const char* d, const char* sfx) {
+  size_t dl = strlen(d), sl = strlen(sfx);
+  return dl >= sl && strcmp(d + dl - sl, sfx) == 0 && (dl == sl || d[dl - sl - 1] == '.');
+}
+static void learnOs(Dev* c, const char* domain) {
+  if (osRank(c->os) == 2) return;
+  anyWord(OS_HINTS, [&](const char* w) {
+    char* colon = strchr((char*)w, ':'); if (!colon) return false;
+    *colon = 0; uint8_t os = atoi(colon + 1);
+    if (osRank(os) > osRank(c->os) && endsWithDomain(domain, w)) { c->os = os; return osRank(os) == 2; }
+    return false;
+  });
+}
+
+struct NetName { uint32_t ip; uint8_t os; char name[31]; };
+static const int MAX_NAMES = 16;
+static NetName netNames[MAX_NAMES]; static int numNames = 0, nextName = 0;
+static const NetName* findName(uint32_t ip) { for (int i = 0; i < numNames; i++) if (netNames[i].ip == ip) return &netNames[i]; return nullptr; }
+static void setName(uint32_t ip, const char* name, size_t len, uint8_t os) {
+  NetName* n = (NetName*)findName(ip);
+  if (!n) { n = &netNames[nextName]; nextName = (nextName + 1) % MAX_NAMES; if (numNames < MAX_NAMES) numNames++; n->ip = ip; n->os = 0; n->name[0] = 0; }
+  if (len) { len = min(len, sizeof(n->name) - 1); memcpy(n->name, name, len); n->name[len] = 0; }
+  if (osRank(os) >= osRank(n->os)) n->os = os;
+}
+// Works on a model ("iPad13,4", "MacBookPro18,1") or a device name ("iPad ของ Thananon").
+static uint8_t osFromModel(const char* m) {
+  if (!m) return OS_NONE;
+  if (strstr(m, "iPhone")) return OS_IPHONE;
+  if (strstr(m, "iPad")) return OS_IPAD;
+  if (strstr(m, "AppleTV") || strstr(m, "Apple TV")) return OS_APPLETV;
+  if (strstr(m, "Mac")) return OS_MAC;
+  return OS_NONE;
+}
+// kind: 0 companion-link (Apple), 1 airplay, 2 androidtvremote2, 3 googlecast
+static void onService(int kind, const MDNSResponder::MDNSServiceInfo& cinfo, MDNSResponder::AnswerType, bool set) {
+  if (!set) return;
+  auto& info = const_cast<MDNSResponder::MDNSServiceInfo&>(cinfo);
+  const char* dom = info.serviceDomain();
+  if (!dom || !info.IP4AddressAvailable()) return;
+  std::vector<IPAddress> ips = info.IP4Adresses(); if (ips.empty()) return;
+  const char* end = strstr(dom, "._"); size_t len = end ? (size_t)(end - dom) : strlen(dom);
+  const char* name = dom;
+  uint8_t os = OS_NONE;
+  const char* model = info.txtAvailable() ? (kind == 0 ? info.value("rpMd") : kind == 1 ? info.value("model") : kind == 3 ? info.value("md") : nullptr) : nullptr;
+  if (kind == 0) {
+    os = osFromModel(model);
+    if (!os) { String n(name); n.remove(len); os = osFromModel(n.c_str()); }   // iPads/iPhones often omit the model
+    if (!os) os = OS_APPLE;
+  }
+  if (kind == 1) { os = osFromModel(model); if (!os) os = model ? OS_SMARTTV : OS_NONE; }
+  if (kind == 2) os = OS_ANDROIDTV;
+  if (kind == 3) {                                   // Chromecast/Google TV: instance is a UUID, use the friendly name
+    const char* fn = info.txtAvailable() ? info.value("fn") : nullptr;
+    if (fn) { name = fn; len = strlen(fn); }
+    os = OS_ANDROIDTV;
+  }
+  setName((uint32_t)ips[0], name, len, os);
+}
+// The mDNS library keeps every answer cached while a query is installed, which costs several
+// KB on a busy network. So listen in short bursts: names are copied into netNames, then the
+// queries are removed. A burst runs at boot, when a new device shows up, and every 30 min.
+static const uint32_t DISCOVERY_MS = 90000, DISCOVERY_EVERY_MS = 30UL * 60000, DISCOVERY_MIN_GAP_MS = 120000;
+static MDNSResponder::hMDNSServiceQuery mdnsQ[4];
+static bool discovering = false, discoveryWanted = true;
+static uint32_t discoveryAt = 0;
+static void startDeviceDiscovery() {
+  mdnsQ[0] = MDNS.installServiceQuery("companion-link", "tcp", [](const MDNSResponder::MDNSServiceInfo& i, MDNSResponder::AnswerType t, bool s) { onService(0, i, t, s); });
+  mdnsQ[1] = MDNS.installServiceQuery("airplay", "tcp",        [](const MDNSResponder::MDNSServiceInfo& i, MDNSResponder::AnswerType t, bool s) { onService(1, i, t, s); });
+  mdnsQ[2] = MDNS.installServiceQuery("androidtvremote2", "tcp", [](const MDNSResponder::MDNSServiceInfo& i, MDNSResponder::AnswerType t, bool s) { onService(2, i, t, s); });
+  mdnsQ[3] = MDNS.installServiceQuery("googlecast", "tcp",     [](const MDNSResponder::MDNSServiceInfo& i, MDNSResponder::AnswerType t, bool s) { onService(3, i, t, s); });
+  discovering = true; discoveryWanted = false; discoveryAt = millis();
+}
+static void stopDeviceDiscovery() {
+  for (auto& q : mdnsQ) if (q) { MDNS.removeServiceQuery(q); q = 0; }
+  discovering = false; discoveryAt = millis();
+}
+static void deviceDiscoveryTick() {
+  uint32_t since = millis() - discoveryAt;
+  if (discovering) { if (since > DISCOVERY_MS) stopDeviceDiscovery(); }
+  else if ((discoveryWanted && since > DISCOVERY_MIN_GAP_MS) || since > DISCOVERY_EVERY_MS) startDeviceDiscovery();
+}
+static void noteNewDevice(uint32_t ip) { if (!findName(ip)) discoveryWanted = true; }   // listen for its name soon
+
+// ---------- lookup log ----------
+// The last LOG_SIZE lookups (domain, device, result) for the dashboard's Activity tab.
+// RAM only: it starts empty after a restart and never wears the flash. A device repeating
+// a recent lookup bumps that line's count instead of pushing older lines out.
+enum : uint8_t { LOG_ALLOWED, LOG_BLOCKED, LOG_SCAM, LOG_TRUNC = 0x80 };
+struct LogEntry { uint32_t ip, at; uint16_t count; uint8_t status; char d[41]; };   // 52 bytes
+static const int LOG_SIZE = 64;                                                     // ~3.3 KB
+static LogEntry qlog[LOG_SIZE]; static int logHead = 0, logCount = 0;
+static void logQuery(const char* d, size_t len, uint32_t ip, uint8_t status) {
+  if (endsWithDomain(d, "arpa") || endsWithDomain(d, "local")) return;
+  const size_t keep = sizeof(qlog[0].d) - 1;
+  if (len > keep) { d += len - keep; len = keep; status |= LOG_TRUNC; }   // keep the end: the site's own name
+  for (int k = 1; k <= min(logCount, 8); k++) {
+    LogEntry& e = qlog[(logHead - k + LOG_SIZE) % LOG_SIZE];
+    if (e.ip == ip && strcmp(e.d, d) == 0) { e.at = millis(); e.status = status; if (e.count < 0xFFFF) e.count++; return; }
+  }
+  LogEntry& e = qlog[logHead];
+  e.ip = ip; e.at = millis(); e.count = 1; e.status = status; memcpy(e.d, d, len); e.d[len] = 0;
+  logHead = (logHead + 1) % LOG_SIZE; if (logCount < LOG_SIZE) logCount++;
 }
 
 // ---------- DNS ----------
@@ -447,10 +571,12 @@ static bool handleDns() {
     char domain[256]; uint16_t qtype = 0; int qend = qlen;
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev* c = getClient((uint32_t)cip);
+    if (c && dl) learnOs(c, domain);
     bool ban = c && c->banned;
     bool blocked = ban;
+    uint8_t scam = 0;
     if (!ban && blockingOn && dl && !isAllowed(domain)) {
-      uint8_t scam = scamKind(domain);
+      scam = scamKind(domain);
       if (scam) recordHit(domain, (uint32_t)cip, scam);
       blocked = scam || (numHashes && isBlocked(domain));
     }
@@ -460,6 +586,7 @@ static bool handleDns() {
     else if (blockingOn && dl && safeSearchIP(domain, safeIP)) { rlen = buildAnswer(qend, qtype, safeIP); totalAllowed++; if (c) c->allowed++; }
     else         { rlen = forwardUpstream(qlen, qend);     totalAllowed++; if (c) c->allowed++; }
     if (rlen > 0) { dnsServer.beginPacket(cip, cport); dnsServer.write(buf, rlen); dnsServer.endPacket(); }
+    if (dl) logQuery(domain, dl, (uint32_t)cip, scam ? LOG_SCAM : blocked ? LOG_BLOCKED : LOG_ALLOWED);
   }
   return did;
 }
@@ -533,7 +660,11 @@ static void handleStats() {
     if (i) J(",");
     J("{\"ip\":"); o.ip(c.ip); J(",\"mac\":"); o.str(mac);
     J(",\"blocked\":"); o.unum(c.blocked); J(",\"allowed\":"); o.unum(c.allowed);
-    J(",\"banned\":"); o.boolean(c.banned); J("}");
+    J(",\"banned\":"); o.boolean(c.banned);
+    const NetName* n = findName(c.ip);
+    J(",\"os\":"); o.unum(n && osRank(n->os) >= osRank(c.os) ? n->os : c.os);
+    if (n && n->name[0]) { J(",\"name\":"); o.str(n->name); }
+    J("}");
   }
   bool first = true;
   J("],\"custom\":["); customList.each([&](const char* d) { if (!first) J(","); first = false; o.str(d); });
@@ -551,6 +682,25 @@ static void handleStats() {
   J("]}}");
   o.flush();
   web.sendContent("");                               // end of chunked response
+}
+static bool requireAuth();
+// Lookup log, newest first. Behind the dashboard password: it's the family's browsing.
+static void handleLog() {
+  if (!requireAuth()) return;
+  web.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  web.send(200, "application/json", "");
+  ChunkOut o;
+  J("[");
+  for (int k = 1; k <= logCount; k++) {
+    const LogEntry& e = qlog[(logHead - k + LOG_SIZE) % LOG_SIZE];
+    if (k > 1) J(",");
+    J("{\"d\":"); o.str(e.d); J(",\"ip\":"); o.ip(e.ip);
+    J(",\"s\":"); o.unum(e.status & 0x7F); J(",\"t\":"); o.boolean(e.status & LOG_TRUNC);
+    J(",\"n\":"); o.unum(e.count); J(",\"ago\":"); o.unum((millis() - e.at) / 1000); J("}");
+  }
+  J("]");
+  o.flush();
+  web.sendContent("");
 }
 #undef J
 // Every state-changing endpoint needs Basic Auth plus a custom header. Browsers replay
@@ -847,7 +997,10 @@ void setup() {
 
   if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
   Serial.printf_P(PSTR("WiFi up: %s\n"), WiFi.localIP().toString().c_str());
-  if (MDNS.begin(HOSTNAME)) { MDNS.addService("http", "tcp", 80); Serial.printf_P(PSTR("dashboard: http://%s.local\n"), HOSTNAME); }
+  if (MDNS.begin(HOSTNAME)) {
+    MDNS.addService("http", "tcp", 80); startDeviceDiscovery();
+    Serial.printf_P(PSTR("dashboard: http://%s.local\n"), HOSTNAME);
+  }
 
   if (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0)
     Serial.println(F("[WARN] secrets.h still has placeholder WEB_PASS/OTA_PASS — those are public "
@@ -858,6 +1011,7 @@ void setup() {
   web.collectHeaders(CSRF_HEADER);  // needed for requireAuth()'s CSRF check
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
+  web.on("/log.json", handleLog);
   web.on("/ban", handleBan);
   web.on("/addblock", []() { if (!requireAuth()) return; customList.add(web.arg("d")); web.send_P(200, PSTR("text/plain"), PSTR("ok")); });
   web.on("/unblock", []() { if (!requireAuth()) return; customList.remove(web.arg("d")); web.send_P(200, PSTR("text/plain"), PSTR("ok")); });
@@ -888,9 +1042,6 @@ void setup() {
     saveUpdateCfg(); web.send_P(200, PSTR("text/plain"), PSTR("ok"));
   });
   web.begin();
-  ArduinoOTA.setHostname(HOSTNAME);      // pio run -t upload --upload-port adblock.local
-  ArduinoOTA.setPassword(OTA_PASS);
-  ArduinoOTA.begin();
   Serial.printf_P(PSTR("DNS :53 + dashboard :80 + OTA up (free heap %u)\n"), (unsigned)ESP.getFreeHeap());
 }
 
@@ -907,7 +1058,7 @@ static void selfHeal() {
 
 void loop() {
   selfHeal();
-  ArduinoOTA.handle();
+  deviceDiscoveryTick();
   MDNS.update();
   web.handleClient();
   bool busy = handleDns();

@@ -21,7 +21,7 @@ It is about 507 KB now. If OTA refuses a bigger build, flash it over USB.
 ## Build & flash
 
 ```bash
-cp src/secrets.example.h src/secrets.h      # set WiFi (optional) and WEB_PASS / OTA_PASS
+cp src/secrets.example.h src/secrets.h      # set WiFi (optional) and WEB_PASS
 python3 tools/build_blocklist.py data/blocklist.bin <sources...>   # see "Family preset"
 pio run -t upload                           # D1 mini: pio run -e d1_mini -t upload
 pio run -t uploadfs                         # writes data/ (blocklist.bin, custom.txt)
@@ -74,12 +74,17 @@ The lists live in `REMOTE_APPS`, `BRAND_PARTS`, `BRAND_WORDS` and `BRAND_OFFICIA
 ## Dashboard
 
 **http://adblock.local** (or the board's IP). Minimal, mobile-first, follows the phone's
-light/dark mode. Four tabs:
+light/dark mode. Five tabs:
 
 - **Home:** blocked count, protection status with *Pause 5 min / 30 min / 1 h* and
   *Resume*, protection switches (remote-control apps, fake bank sites), recent scams stopped
-- **Devices:** every device using the box with its block rate, a *Block* switch, and names
-  you can edit (stored in your browser)
+- **Activity:** the last 64 sites looked up, with the device that asked, how often, and
+  whether it was blocked. Filter by device or show blocked only; *Block* / *Allow* acts on
+  the whole site. Needs the dashboard password, and lives in RAM only (cleared on restart).
+- **Devices:** every device using the box, recognized automatically: names that Apple
+  devices and TVs announce over Bonjour ("iPad ของ Thananon", "Thananon's MacBook Pro"),
+  and the type (iPhone, iPad, Mac, Android, Android TV, Windows PC, smart TV, consoles)
+  from the lookups each OS makes. Tap a name to rename it (stored in your browser).
 - **Sites:** block or always-allow any website (links and Thai addresses such as `รัก.com`
   are converted automatically), with lists of both
 - **Settings:** address, WiFi, memory, uptime, blocklist upload and auto-update, firmware
