@@ -18,5 +18,3 @@ src/secrets.h
 # Backups / scratch
 *.bak
 
-# Personal custom block list (seeds LittleFS via uploadfs)
-data/custom.txt
