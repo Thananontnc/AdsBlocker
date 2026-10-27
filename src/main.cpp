@@ -215,6 +215,150 @@ static void removeCustom(String d) {
     numCustom--; saveCustom(); return;
   }
 }
+// ---------- scam protection ----------
+// Two built-in checks on top of the blocklist, each with its own dashboard switch:
+//  - remote-control apps: Thai call-center scammers talk victims into installing AnyDesk,
+//    TeamViewer & co. and then empty the bank account through them
+//  - fake bank/government sites: the registered name uses a Thai bank or agency name but
+//    isn't the official site (krungthai-secure.xyz, scb-th.com, pea-refund.net, ...)
+// The allow list overrides every block (blocklist, custom, scam) to fix false positives.
+static const char REMOTE_APPS[] PROGMEM =
+  "anydesk.com anydesk.de teamviewer.com rustdesk.com airdroid.com airdroid.cn splashtop.com "
+  "zohoassist.com assist.zoho.com logmein.com logme.in gotoassist.com screenconnect.com "
+  "ultraviewer.net supremocontrol.com nanosystems.it getscreen.me remotepc.com iperiusremote.com "
+  "aweray.com aweray.net oray.com oray.net todesk.com showmypc.com mikogo.com dwservice.net "
+  "hoptodesk.com remoteutilities.com ammyy.com remotedesktop.google.com "
+  "remotedesktop-pa.googleapis.com remoteassistance.support.services.microsoft.com";
+// Matched anywhere inside the registered name ("mykrungthai-login" hits "krungthai").
+static const char BRAND_PARTS[] PROGMEM =
+  "krungthai kasikorn bangkokbank krungsri promptpay truemoney thaipost thailandpost scbeasy";
+// Matched only as a whole word of the registered name ("scb-th" hits, "scuba" doesn't).
+static const char BRAND_WORDS[] PROGMEM =
+  "scb ktb kbank kplus bbl gsb mymo ttb baac uob cimb kkp ghb ghbank lhbank pea mea pwa dsi sso dol";
+// Official non-.th sites that use those names (.go.th/.or.th/.co.th/.ac.th/.mi.th are
+// THNIC-verified registrations and always trusted).
+static const char BRAND_OFFICIAL[] PROGMEM =
+  "krungthai.com kasikornbank.com bangkokbank.com krungsri.com krungsrionline.com scbeasy.com "
+  "ttbbank.com cimbthai.com truemoney.com promptpay.io";
+
+static const int MAX_REMOTE = 48;
+static uint64_t remoteHash[MAX_REMOTE]; static int numRemote = 0;
+static bool scamRemoteOn = true, scamBankOn = true;
+static uint32_t scamBlocked = 0;
+
+static const int MAX_ALLOW = 32;
+String allowDom[MAX_ALLOW]; uint64_t allowHash[MAX_ALLOW]; int numAllow = 0;
+
+struct ScamHit { char d[64]; uint32_t ip, at; uint8_t kind; };   // kind 1 = remote app, 2 = fake brand
+static const int MAX_HITS = 10;
+static ScamHit hits[MAX_HITS]; static int numHits = 0;           // hits[0] = newest
+
+// Calls fn(word) for each space-separated word of a PROGMEM list until fn returns true.
+template <typename F> static bool anyWord(PGM_P list, F fn) {
+  char w[64]; size_t n = 0;
+  for (PGM_P p = list; ; p++) {
+    char ch = pgm_read_byte(p);
+    if (ch == ' ' || ch == 0) {
+      if (n) { w[n] = 0; if (fn(w)) return true; n = 0; }
+      if (!ch) return false;
+    } else if (n < sizeof(w) - 1) w[n++] = ch;
+  }
+}
+// Same parent-suffix walk as isBlocked(): "a.b.anydesk.com" matches "anydesk.com".
+static bool suffixIn(const char* d, const uint64_t* set, int n) {
+  for (const char* p = d; p && *p; ) {
+    uint64_t h = fnv40(p, strlen(p));
+    for (int i = 0; i < n; i++) if (set[i] == h) return true;
+    const char* dot = strchr(p, '.'); if (!dot || !strchr(dot + 1, '.')) break; p = dot + 1;
+  }
+  return false;
+}
+static bool isAllowed(const char* d) { return numAllow && suffixIn(d, allowHash, numAllow); }
+
+// Registered name: last two labels, or three under ccTLD second levels (x.co.th, x.com.au).
+static const char* registrable(const char* d, bool* thaiVerified) {
+  const char* lab[3] = { d, d, d }; int found = 0;
+  for (const char* p = d + strlen(d); p > d && found < 3; p--) if (p[-1] == '.') lab[found++] = p;
+  *thaiVerified = false;
+  if (found < 2) return d;
+  size_t sldLen = lab[0] - lab[1] - 1, tldLen = strlen(lab[0]);
+  static const char* const SLDS[] = { "co", "or", "go", "ac", "in", "mi", "com", "net", "org", "gov", "edu" };
+  bool ccSld = false;
+  if (tldLen == 2) for (const char* s : SLDS) if (strlen(s) == sldLen && strncmp(lab[1], s, sldLen) == 0) { ccSld = true; break; }
+  if (!ccSld) return lab[1];
+  *thaiVerified = strcmp(lab[0], "th") == 0 && sldLen == 2 && strncmp(lab[1], "in", 2) != 0;
+  return found >= 3 ? lab[2] : d;
+}
+static bool fakeBrand(const char* d) {
+  bool thaiVerified; const char* reg = registrable(d, &thaiVerified);
+  if (thaiVerified) return false;
+  if (anyWord(BRAND_OFFICIAL, [&](const char* w) { return strcmp(reg, w) == 0; })) return false;
+  // A real-looking address used as a mere prefix: "krungthai.co.th.login-secure.com",
+  // "kasikornbank.com.verify.net". The registered name is the scammer's.
+  static const char* const TH_SLD[] = { ".co.th.", ".go.th.", ".or.th.", ".ac.th.", ".in.th." };
+  for (const char* s : TH_SLD) if (strstr(d, s)) return true;
+  if (reg > d) {
+    String sub(d); sub.remove(reg - d);              // "kasikornbank.com."
+    if (sub.indexOf(".com.") >= 0 &&
+        anyWord(BRAND_PARTS, [&](const char* w) { return sub.indexOf(w) >= 0; })) return true;
+  }
+  char name[64]; size_t n = 0;                     // the chosen name, e.g. "krungthai-secure"
+  while (reg[n] && reg[n] != '.' && n < sizeof(name) - 1) { name[n] = reg[n]; n++; }
+  name[n] = 0;
+  if (anyWord(BRAND_PARTS, [&](const char* w) { return strstr(name, w) != nullptr; })) return true;
+  return anyWord(BRAND_WORDS, [&](const char* w) {
+    size_t wl = strlen(w);
+    for (const char* p = name; (p = strstr(p, w)); p++) {
+      bool before = p == name || !isalpha((uint8_t)p[-1]);
+      bool after  = !isalpha((uint8_t)p[wl]);
+      if (before && after) return true;
+    }
+    return false;
+  });
+}
+static uint8_t scamKind(const char* d) {
+  if (scamRemoteOn && suffixIn(d, remoteHash, numRemote)) return 1;
+  if (scamBankOn && fakeBrand(d)) return 2;
+  return 0;
+}
+static void recordHit(const char* d, uint32_t ip, uint8_t kind) {
+  scamBlocked++;
+  if (numHits && hits[0].ip == ip && strncmp(hits[0].d, d, sizeof(hits[0].d) - 1) == 0) { hits[0].at = millis(); return; }
+  if (numHits < MAX_HITS) numHits++;
+  for (int i = numHits - 1; i > 0; i--) hits[i] = hits[i - 1];
+  strncpy(hits[0].d, d, sizeof(hits[0].d) - 1); hits[0].d[sizeof(hits[0].d) - 1] = 0;
+  hits[0].ip = ip; hits[0].at = millis(); hits[0].kind = kind;
+}
+
+static void loadScam() {
+  numRemote = 0;
+  anyWord(REMOTE_APPS, [](const char* w) { if (numRemote < MAX_REMOTE) remoteHash[numRemote++] = fnv40(w, strlen(w)); return false; });
+  File f = LittleFS.open("/scam.cfg", "r");
+  if (f) { scamRemoteOn = f.readStringUntil('\n').toInt() != 0; scamBankOn = f.readStringUntil('\n').toInt() != 0; f.close(); }
+  numAllow = 0; f = LittleFS.open("/allow.txt", "r"); if (!f) return;
+  while (f.available() && numAllow < MAX_ALLOW) {
+    String l = f.readStringUntil('\n'); l.trim(); l.toLowerCase();
+    if (l.length() && l.indexOf('.') > 0) { allowDom[numAllow] = l; allowHash[numAllow] = fnv40(l.c_str(), l.length()); numAllow++; }
+  }
+  f.close();
+}
+static void saveScam() { File f = LittleFS.open("/scam.cfg", "w"); if (!f) return; f.println(scamRemoteOn ? 1 : 0); f.println(scamBankOn ? 1 : 0); f.close(); }
+static void saveAllow() { File f = LittleFS.open("/allow.txt", "w"); if (!f) return; for (int i = 0; i < numAllow; i++) f.println(allowDom[i]); f.close(); }
+static bool addAllow(String d) {
+  d.trim(); d.toLowerCase(); if (d.startsWith("www.")) d = d.substring(4);
+  if (!d.length() || d.indexOf('.') < 0 || numAllow >= MAX_ALLOW) return false;
+  for (int i = 0; i < numAllow; i++) if (allowDom[i] == d) return false;
+  removeCustom(d);                                   // allowing beats an older custom block
+  allowDom[numAllow] = d; allowHash[numAllow] = fnv40(d.c_str(), d.length()); numAllow++; saveAllow(); return true;
+}
+static void removeAllow(String d) {
+  d.toLowerCase();
+  for (int i = 0; i < numAllow; i++) if (allowDom[i] == d) {
+    for (int j = i; j < numAllow - 1; j++) { allowDom[j] = allowDom[j+1]; allowHash[j] = allowHash[j+1]; }
+    numAllow--; saveAllow(); return;
+  }
+}
+
 static bool isBannedIP(uint32_t ip) { for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) return true; return false; }
 static void loadBanned() {
   numBanned = 0; File f = LittleFS.open("/banned.txt", "r"); if (!f) return;
@@ -321,7 +465,12 @@ static bool handleDns() {
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev* c = getClient((uint32_t)cip);
     bool ban = c && c->banned;
-    bool blocked = ban || (blockingOn && dl && numHashes && isBlocked(domain));
+    bool blocked = ban;
+    if (!ban && blockingOn && dl && !isAllowed(domain)) {
+      uint8_t scam = scamKind(domain);
+      if (scam) recordHit(domain, (uint32_t)cip, scam);
+      blocked = scam || (numHashes && isBlocked(domain));
+    }
     int rlen;
     IPAddress safeIP;
     if (blocked) { rlen = buildAnswer(qend, qtype, IPAddress(0, 0, 0, 0)); totalBlocked++; if (c) c->blocked++; }
@@ -370,7 +519,14 @@ static void handleStats() {
     j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
   j += "],\"custom\":[";
   for (int i = 0; i < numCustom; i++) { j += (i ? "," : ""); j += "\"" + jesc(customDom[i]) + "\""; }
-  j += "]}";
+  j += "],\"allow\":[";
+  for (int i = 0; i < numAllow; i++) { j += (i ? "," : ""); j += "\"" + jesc(allowDom[i]) + "\""; }
+  j += String("],\"scam\":{\"remote\":") + (scamRemoteOn ? "true" : "false") + ",\"bank\":" + (scamBankOn ? "true" : "false") +
+       ",\"blocked\":" + scamBlocked + ",\"hits\":[";
+  for (int i = 0; i < numHits; i++) { IPAddress ip(hits[i].ip);
+    j += (i ? "," : ""); j += "{\"d\":\"" + jesc(hits[i].d) + "\",\"ip\":\"" + ip.toString() + "\",\"k\":" + hits[i].kind +
+                              ",\"ago\":" + (uint32_t)((millis() - hits[i].at) / 1000) + "}"; }
+  j += "]}}";
   web.send(200, "application/json", j);
 }
 // Every state-changing endpoint needs Basic Auth plus a custom header. Browsers replay
@@ -647,7 +803,7 @@ void setup() {
     Serial.printf("blocklist: %u domains\n", (unsigned)numHashes);
     buildFlashIndex();
   }
-  loadCustom(); loadBanned(); loadUpdateCfg();
+  loadCustom(); loadBanned(); loadUpdateCfg(); loadScam();
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
 
   Serial.println("press FLASH within 3 s to forget saved WiFi");
@@ -669,6 +825,14 @@ void setup() {
   web.on("/ban", handleBan);
   web.on("/addblock", []() { if (!requireAuth()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/unblock", []() { if (!requireAuth()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/allow", []() { if (!requireAuth()) return; addAllow(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/unallow", []() { if (!requireAuth()) return; removeAllow(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/scamset", []() {                  // /scamset?remote=0|1&bank=0|1
+    if (!requireAuth()) return;
+    if (web.hasArg("remote")) scamRemoteOn = web.arg("remote") == "1";
+    if (web.hasArg("bank"))   scamBankOn   = web.arg("bank") == "1";
+    saveScam(); web.send(200, "text/plain", "ok");
+  });
   web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)
     if (!requireAuth()) return;
     long s = web.hasArg("s") ? web.arg("s").toInt() : 0;

@@ -57,6 +57,17 @@ input[type=file]{font-size:13px;max-width:100%}
 .alert{background:var(--badbg);color:var(--bad);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13.5px;display:none}
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(30px);opacity:0;background:var(--text);color:var(--bg);padding:11px 18px;border-radius:12px;font-size:14px;transition:.25s;pointer-events:none;max-width:90vw;text-align:center;z-index:9}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+.tog{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line);cursor:pointer}
+.tog:first-of-type{border-top:0;padding-top:0}.tog input{position:absolute;opacity:0;pointer-events:none}
+.sw{flex:none;width:46px;height:28px;border-radius:99px;background:var(--line);position:relative;margin-top:2px}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0003}
+.ready .sw,.ready .sw::after{transition:.2s}
+.tog input:checked+.sw{background:var(--ok)}.tog input:checked+.sw::after{left:21px}
+.tog input:focus-visible+.sw{outline:2px solid var(--acc);outline-offset:2px}
+.tog small{display:block;color:var(--muted);font-size:12.5px;font-weight:400}
+h3.sub{font-size:12px;color:var(--muted);margin:18px 0 0;text-transform:uppercase;letter-spacing:.05em}
+.k1{color:var(--warn)}.k2{color:var(--bad)}
 #offline{display:none;background:var(--warnbg);color:var(--warn);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13.5px}
 </style></head><body><div class=wrap>
 <header><span class=logo>&#128737;&#65039;</span><h1>Home AdBlock<small id=sub>connecting&hellip;</small></h1></header>
@@ -82,9 +93,17 @@ input[type=file]{font-size:13px;max-width:100%}
 <span class=chip>Ads &amp; trackers</span><span class=chip>Pop-ups</span><span class=chip>Adult / porn</span><span class=chip>Gambling &amp; casino</span>
 <span class=chip>Scams &amp; phishing</span><span class=chip>Fake shops</span><span class=chip>Malware</span><span class=chip>SafeSearch (Google, YouTube, Bing)</span></div></section>
 
+<section class=card><h2>&#128680; Scam protection<span class=n id=scamN></span></h2>
+<label class=tog><input type=checkbox id=tRemote onchange="scamSet('remote',this)"><span class=sw></span><span><b>Block remote-control apps</b>
+<small>AnyDesk, TeamViewer, RustDesk&hellip; Fake police or bank callers ask victims to install these, then empty the bank account.</small></span></label>
+<label class=tog><input type=checkbox id=tBank onchange="scamSet('bank',this)"><span class=sw></span><span><b>Block fake bank &amp; government sites</b>
+<small>Sites that copy names like Krungthai, SCB, KBank, PromptPay or PEA but aren't the real ones. Real .co.th / .go.th / .or.th sites are never blocked.</small></span></label>
+<h3 class=sub>Recently stopped</h3><div class=list id=hits></div>
+<h3 class=sub>Always allowed</h3><p class=hint style=margin-top:4px>Never blocked by anything. If a real app or website stops working, press <b>Allow</b> on it.</p><div class=list id=allowl></div></section>
+
 <section class=card><h2>&#128683; Block a website<span class=n id=cCount></span></h2>
 <p class=hint>Paste a link or type a name, e.g. <b>ads.example.com</b> or a Thai address like <b>&#3619;&#3633;&#3585;.com</b>. Its sub-sites are blocked too.</p>
-<form class=row id=addf><input id=dom placeholder="website or link" autocomplete=off autocapitalize=off spellcheck=false><button class=pri>Block</button></form>
+<form class=row id=addf><input id=dom placeholder="website or link" autocomplete=off autocapitalize=off spellcheck=false><button class=pri>Block</button><button type=button onclick=allowSite()>Allow</button></form>
 <div class=list id=custom></div></section>
 
 <section class=card><h2>&#128241; Devices<span class=n id=dCount></span></h2>
@@ -129,6 +148,13 @@ $('custom').onclick=e=>{let b=e.target.closest('[data-d]');if(b)api('/unblock?d=
 $('devs').onclick=e=>{let b=e.target.closest('[data-ip]');if(b){let on=b.dataset.ban=='1';
 if(on||confirm('Block ALL internet for this device?'))api('/ban?ip='+b.dataset.ip,on?'Device allowed again':'Device blocked')}
 let n=e.target.closest('[data-mac]');if(n){let v=prompt('Name for this device (empty = reset):',names()[n.dataset.mac]||'');if(v!==null){setName(n.dataset.mac,v.trim());render()}}};
+function scamSet(k,el){api('/scamset?'+k+'='+(el.checked?1:0),el.checked?'Turned on':'Turned off \u2014 less protection')}
+function ago(s){return s<60?'just now':s<3600?Math.floor(s/60)+' min ago':Math.floor(s/3600)+' h ago'}
+function base(d){let p=d.split('.'),n=p.length,cc=n>2&&p[n-1].length==2&&/^(co|or|go|ac|in|mi|com|net|org|gov|edu)$/.test(p[n-2]);return p.slice(cc?-3:-2).join('.')}
+function allowSite(){let h=toHost($('dom').value);if(!h||h.indexOf('.')<0){toast('That doesn\'t look like a website');return}
+api('/allow?d='+encodeURIComponent(h),'Always allowed: '+uni(h)).then(r=>{if(r!==false)$('dom').value=''})}
+$('hits').onclick=e=>{let b=e.target.closest('[data-allow]');if(b&&confirm('Allow '+uni(b.dataset.allow)+'? Only do this if you are sure it is a real, safe site.'))api('/allow?d='+encodeURIComponent(b.dataset.allow),'Always allowed: '+uni(b.dataset.allow))};
+$('allowl').onclick=e=>{let b=e.target.closest('[data-un]');if(b)api('/unallow?d='+encodeURIComponent(b.dataset.un),'Removed '+uni(b.dataset.un))};
 function saveUpd(){api('/setupdate?u='+encodeURIComponent($('uurl').value.trim())+'&h='+(parseInt($('uiv').value)||24),'Saved')}
 function fetchNow(){$('ustat').textContent='downloading…';toast('Updating blocklist…');api('/fetchnow')}
 function forgetWifi(){if(confirm('Forget WiFi and restart into setup mode?'))api('/forgetwifi','Restarting into setup mode')}
@@ -154,9 +180,13 @@ $('devs').innerHTML=cs.map(c=>{let t=c.blocked+c.allowed,pc=t?Math.round(c.block
 return`<div class="item dev"><div class=t><button class=name data-mac="${esc(c.mac)}">${esc(n||c.ip)}</button>${c.banned?'<span class=tag>BLOCKED</span>':''}
 <small>${n?esc(c.ip)+' · ':''}${fmt(c.blocked)} blocked of ${fmt(t)} (${pc}%)</small><div class=bar><i style="width:${pc}%"></i></div></div>
 <button class="sm ${c.banned?'go':'del'}" data-ip="${esc(c.ip)}" data-ban="${c.banned?1:0}">${c.banned?'Allow':'Block all'}</button></div>`}).join('')||'<div class=empty>No devices use the box yet. Set your router\'s DNS to '+esc(s.ip)+'.</div>';
+let sc=s.scam||{hits:[]},ipn={};cs.forEach(c=>ipn[c.ip]=nm[c.mac]||c.ip);
+$('tRemote').checked=!!sc.remote;$('tBank').checked=!!sc.bank;$('scamN').textContent=sc.blocked?fmt(sc.blocked)+' stopped':'';
+$('hits').innerHTML=sc.hits.map(h=>`<div class=item><div class=t>${esc(uni(h.d))}<small><b class=k${h.k}>${h.k==1?'Remote-control app':'Fake bank / government site'}</b> \u00b7 ${esc(ipn[h.ip]||h.ip)} \u00b7 ${ago(h.ago)}</small></div><button class=sm data-allow="${esc(base(h.d))}">Allow</button></div>`).join('')||'<div class=empty>Nothing stopped yet \u{1F44D}</div>';
+$('allowl').innerHTML=(s.allow||[]).map(d=>`<div class=item><div class=t>${esc(uni(d))}</div><button class="sm del" data-un="${esc(d)}">Remove</button></div>`).join('')||'<div class=empty>None.</div>';
 $('sys').innerHTML=[['Address','http://adblock.local · '+s.ip],['WiFi',(s.ssid||'?')+' ('+s.rssi+' dBm)'],['Free memory',Math.round(s.heap/1024)+' KB'],
 ['Last restart',s.boot],['Requests',fmt(total)]].map(r=>`<span>${r[0]}</span><span>${esc(r[1])}</span>`).join('');
 if(document.activeElement!=$('uurl'))$('uurl').value=s.upurl||'';if(document.activeElement!=$('uiv'))$('uiv').value=s.upiv||24;$('ustat').textContent=s.upstat||'–'}
-async function load(){try{let r=await fetch('/stats.json',{cache:'no-store'});S=await r.json();$('offline').style.display='none';render()}catch(e){$('offline').style.display='block'}}
+async function load(){try{let r=await fetch('/stats.json',{cache:'no-store'});S=await r.json();$('offline').style.display='none';render();if(!document.body.classList.contains('ready'))setTimeout(()=>document.body.classList.add('ready'),500)}catch(e){$('offline').style.display='block'}}
 load();setInterval(()=>{if(!document.hidden)load()},3000);
 </script></body></html>)HTML";

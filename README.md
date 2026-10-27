@@ -52,6 +52,25 @@ asset while using this preset: it would replace the list with upstream's smaller
 The firmware also forces **Google SafeSearch, YouTube Restricted Mode (moderate) and Bing
 strict search** (`safeSearchIP()` in `src/main.cpp`).
 
+## Scam protection
+
+Two built-in checks on top of the blocklist, each with its own switch on the dashboard:
+
+- **Remote-control apps:** AnyDesk, TeamViewer, RustDesk, AirDroid, UltraViewer, ToDesk,
+  Chrome Remote Desktop, Quick Assist and others. Thai call-center scammers ("police",
+  "DSI", "bank staff") make victims install one of these and then empty the account.
+  Turn this off if someone in the home uses one for real IT support.
+- **Fake bank / government sites:** a domain whose registered name uses a Thai bank or
+  agency name (Krungthai/KTB, SCB, KBank, Bangkok Bank, Krungsri, ttb, GSB, PromptPay,
+  TrueMoney, PEA/MEA/PWA, Thailand Post, DSI, SSO...) but isn't the official site, e.g.
+  `krungthai-secure.xyz`, `scb-th.com`, `krungthai.co.th.login-secure.com`. Sites under
+  `.go.th`, `.or.th`, `.co.th`, `.ac.th` and `.mi.th` are THNIC-verified and never flagged.
+
+The dashboard lists recent hits with the device that tried them. **Always allowed** sites
+override every block (blocklist, custom and scam checks), which fixes false positives.
+The lists live in `REMOTE_APPS`, `BRAND_PARTS`, `BRAND_WORDS` and `BRAND_OFFICIAL` in
+`src/main.cpp`.
+
 ## Dashboard
 
 **http://adblock.local** (or the board's IP). It's mobile-first and follows the phone's
