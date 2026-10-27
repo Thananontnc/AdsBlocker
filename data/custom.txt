@@ -1,4 +1,3 @@
-frukt.pantip.com
 lazada-ad-workstation.oss-ap-southeast-1.aliyuncs.com
 lrdnuu.shopee.co.th
 id-log-emagzal.lazada.com
