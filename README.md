@@ -33,13 +33,16 @@ pio device monitor
 ## Family preset (what the board runs)
 
 Hagezi Pro (ads/trackers) + NSFW (porn) + Gambling mini + Fake (fake shops/scams) + TIF mini
-(phishing/malware/scam) + Pop-up ads. That's about 548k domains / 2.6 MB:
+(phishing/malware/scam) + Pop-up ads + Perflyst SmartTV and Android tracking (TV ACR such
+as Samba TV on TCL). That's about 549k domains / 2.6 MB:
 
 ```bash
 H=https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard
 python3 tools/build_blocklist.py data/blocklist.bin \
   $H/pro-onlydomains.txt $H/nsfw-onlydomains.txt $H/gambling.mini-onlydomains.txt \
-  $H/fake-onlydomains.txt $H/tif.mini-onlydomains.txt $H/popupads-onlydomains.txt
+  $H/fake-onlydomains.txt $H/tif.mini-onlydomains.txt $H/popupads-onlydomains.txt \
+  https://raw.githubusercontent.com/Perflyst/PiHoleBlocklist/master/SmartTV.txt \
+  https://raw.githubusercontent.com/Perflyst/PiHoleBlocklist/master/android-tracking.txt
 ```
 
 Upload the result from the dashboard (*Settings → Upload a new blocklist*) or with
