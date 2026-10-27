@@ -73,17 +73,30 @@ The lists live in `REMOTE_APPS`, `BRAND_PARTS`, `BRAND_WORDS` and `BRAND_OFFICIA
 
 ## Dashboard
 
-**http://adblock.local** (or the board's IP). It's mobile-first and follows the phone's
-light/dark mode:
+**http://adblock.local** (or the board's IP). Minimal, mobile-first, follows the phone's
+light/dark mode. Four tabs:
 
-- Protection status with one-tap *Pause 5 min / 30 min / 1 hr* and *Turn back on*
-- Block any website: paste a link or a Thai address such as `รัก.com`; it's converted to
-  punycode automatically and shown in Thai letters
-- Devices with block rates, a per-device *Block all* switch, and names you can edit
-  (stored in your browser)
-- Settings: system info, blocklist upload, scheduled update, firmware update, forget WiFi
+- **Home:** blocked count, protection status with *Pause 5 min / 30 min / 1 h* and
+  *Resume*, protection switches (remote-control apps, fake bank sites), recent scams stopped
+- **Devices:** every device using the box with its block rate, a *Block* switch, and names
+  you can edit (stored in your browser)
+- **Sites:** block or always-allow any website (links and Thai addresses such as `รัก.com`
+  are converted automatically), with lists of both
+- **Settings:** address, WiFi, memory, uptime, blocklist upload and auto-update, firmware
+  update, forget WiFi
 
 Changes ask for the dashboard password (`WEB_USER` / `WEB_PASS` in `secrets.h`).
+
+## Memory
+
+The ESP8266 has about 80 KB of RAM, so the firmware keeps the heap steady for 24/7 use:
+
+- `/stats.json` is streamed in 256-byte chunks instead of built as one big `String`
+- custom and allow lists keep only 64-bit hashes in RAM; the names stay in LittleFS
+- the setup portal, log messages and HTTP replies live in flash (`PROGMEM` / `F()`)
+
+About 31 KB stays free with ~550k domains loaded. *Settings → Memory* shows free heap and
+how much of it is in one piece.
 
 ## Running 24/7
 

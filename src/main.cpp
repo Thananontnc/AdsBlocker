@@ -56,16 +56,50 @@ uint8_t buf[1536];   // fits any non-fragmented UDP reply (EDNS answers can exce
 // first-level flash index (sorted sample hashes) + small direct-mapped cache
 static uint8_t blIndex[INDEX_ENTRIES][HASH_BYTES];
 static uint8_t cacheKey[CACHE_SIZE][HASH_BYTES];
-static uint8_t cacheRes[CACHE_SIZE];
-static uint8_t cacheValid[CACHE_SIZE];
+static uint8_t cacheState[CACHE_SIZE];   // 0 = empty, 1 = not listed, 2 = listed
 static uint8_t rangeBuf[MAX_RANGE * HASH_BYTES];
 
-struct Dev { uint32_t ip; uint8_t mac[6]; uint32_t blocked, allowed, lastSeen; bool banned; };
+struct Dev { uint32_t ip; uint8_t mac[6]; bool banned; uint32_t blocked, allowed; };
 static const int MAX_CLIENTS = 32;
 Dev clients[MAX_CLIENTS]; int numClients = 0;
 
-static const int MAX_CUSTOM = 64;
-String customDom[MAX_CUSTOM]; uint64_t customHash[MAX_CUSTOM]; int numCustom = 0;
+// A domain list kept as hashes in RAM and as text on flash (one domain per line), so
+// the names themselves never sit in the heap. Used for the custom block and allow lists.
+static uint64_t fnv40(const char* s, size_t n);
+static void normDomain(String& d) { d.trim(); d.toLowerCase(); if (d.startsWith("www.")) d.remove(0, 4); }
+struct DomainList {
+  const char* path; uint64_t* hash; int max; int count;
+  bool has(uint64_t h) const { for (int i = 0; i < count; i++) if (hash[i] == h) return true; return false; }
+  template <typename F> void each(F fn) const {
+    File f = LittleFS.open(path, "r"); if (!f) return;
+    char l[254];
+    while (f.available()) {
+      size_t n = f.readBytesUntil('\n', l, sizeof(l) - 1); l[n] = 0;
+      while (n && (l[n-1] == '\r' || l[n-1] == ' ')) l[--n] = 0;
+      if (n && strchr(l, '.')) fn(l);
+    }
+    f.close();
+  }
+  void load() { count = 0; each([this](const char* d) { if (count < max) hash[count++] = fnv40(d, strlen(d)); }); }
+  bool add(String d) {
+    normDomain(d);
+    if (!d.length() || d.indexOf('.') < 0 || count >= max) return false;
+    uint64_t h = fnv40(d.c_str(), d.length()); if (has(h)) return false;
+    File f = LittleFS.open(path, "a"); if (!f) return false;
+    f.println(d); f.close(); hash[count++] = h; return true;
+  }
+  void remove(String d) {
+    normDomain(d);
+    uint64_t h = fnv40(d.c_str(), d.length()); if (!has(h)) return;
+    File out = LittleFS.open("/list.tmp", "w"); if (!out) return;
+    each([&](const char* l) { if (fnv40(l, strlen(l)) != h) out.println(l); });
+    out.close(); LittleFS.remove(path); LittleFS.rename("/list.tmp", path); load();
+  }
+};
+static const int MAX_CUSTOM = 64, MAX_ALLOW = 32;
+static uint64_t customHash[MAX_CUSTOM], allowHash[MAX_ALLOW];
+static DomainList customList = { "/custom.txt", customHash, MAX_CUSTOM, 0 };
+static DomainList allowList  = { "/allow.txt",  allowHash,  MAX_ALLOW,  0 };
 
 static const int MAX_BAN = 16;
 uint32_t bannedIP[MAX_BAN]; int numBanned = 0;
@@ -112,7 +146,7 @@ static void buildFlashIndex() {
     blocklist.seek(pos * HASH_BYTES);
     blocklist.read(blIndex[i], HASH_BYTES);
   }
-  for (int i = 0; i < CACHE_SIZE; i++) cacheValid[i] = 0;
+  memset(cacheState, 0, sizeof(cacheState));
 }
 
 static bool inFlash(uint64_t h) {
@@ -160,24 +194,17 @@ static bool inFlash(uint64_t h) {
   return false;
 }
 
-static bool inCustom(uint64_t h) { for (int i = 0; i < numCustom; i++) if (customHash[i] == h) return true; return false; }
-
 // Only flash results are cached: the flash list only changes via reopenBlocklist(), which
 // rebuilds the index and clears the cache. Custom domains change at runtime, so they're
 // checked uncached (a short linear scan) to avoid serving stale answers.
 static bool isBlockedHash(uint64_t h) {
-  if (inCustom(h)) return true;
+  if (customList.has(h)) return true;
   uint32_t slot = h & (CACHE_SIZE - 1);
-  if (cacheValid[slot]) {
-    uint8_t want[HASH_BYTES]; packHash(h, want);
-    bool same = true;
-    for (int k = 0; k < HASH_BYTES; k++) if (cacheKey[slot][k] != want[k]) { same = false; break; }
-    if (same) return cacheRes[slot] != 0;
-  }
+  uint8_t want[HASH_BYTES]; packHash(h, want);
+  if (cacheState[slot] && memcmp(cacheKey[slot], want, HASH_BYTES) == 0) return cacheState[slot] == 2;
   bool res = inFlash(h);
-  cacheValid[slot] = 1;
-  cacheRes[slot] = res ? 1 : 0;
-  packHash(h, cacheKey[slot]);
+  cacheState[slot] = res ? 2 : 1;
+  memcpy(cacheKey[slot], want, HASH_BYTES);
   return res;
 }
 
@@ -193,28 +220,6 @@ static bool isBlocked(const char* domain) {
 }
 
 // ---------- persistence ----------
-static void loadCustom() {
-  numCustom = 0; File f = LittleFS.open("/custom.txt", "r"); if (!f) return;
-  while (f.available() && numCustom < MAX_CUSTOM) {
-    String l = f.readStringUntil('\n'); l.trim(); l.toLowerCase();
-    if (l.length() && l.indexOf('.') > 0) { customDom[numCustom] = l; customHash[numCustom] = fnv40(l.c_str(), l.length()); numCustom++; }
-  }
-  f.close();
-}
-static void saveCustom() { File f = LittleFS.open("/custom.txt", "w"); if (!f) return; for (int i = 0; i < numCustom; i++) f.println(customDom[i]); f.close(); }
-static bool addCustom(String d) {
-  d.trim(); d.toLowerCase(); if (d.startsWith("www.")) d = d.substring(4);
-  if (!d.length() || d.indexOf('.') < 0 || numCustom >= MAX_CUSTOM) return false;
-  for (int i = 0; i < numCustom; i++) if (customDom[i] == d) return false;
-  customDom[numCustom] = d; customHash[numCustom] = fnv40(d.c_str(), d.length()); numCustom++; saveCustom(); return true;
-}
-static void removeCustom(String d) {
-  d.toLowerCase();
-  for (int i = 0; i < numCustom; i++) if (customDom[i] == d) {
-    for (int j = i; j < numCustom - 1; j++) { customDom[j] = customDom[j+1]; customHash[j] = customHash[j+1]; }
-    numCustom--; saveCustom(); return;
-  }
-}
 // ---------- scam protection ----------
 // Two built-in checks on top of the blocklist, each with its own dashboard switch:
 //  - remote-control apps: Thai call-center scammers talk victims into installing AnyDesk,
@@ -246,8 +251,6 @@ static uint64_t remoteHash[MAX_REMOTE]; static int numRemote = 0;
 static bool scamRemoteOn = true, scamBankOn = true;
 static uint32_t scamBlocked = 0;
 
-static const int MAX_ALLOW = 32;
-String allowDom[MAX_ALLOW]; uint64_t allowHash[MAX_ALLOW]; int numAllow = 0;
 
 struct ScamHit { char d[64]; uint32_t ip, at; uint8_t kind; };   // kind 1 = remote app, 2 = fake brand
 static const int MAX_HITS = 10;
@@ -273,7 +276,7 @@ static bool suffixIn(const char* d, const uint64_t* set, int n) {
   }
   return false;
 }
-static bool isAllowed(const char* d) { return numAllow && suffixIn(d, allowHash, numAllow); }
+static bool isAllowed(const char* d) { return allowList.count && suffixIn(d, allowHash, allowList.count); }
 
 // Registered name: last two labels, or three under ccTLD second levels (x.co.th, x.com.au).
 static const char* registrable(const char* d, bool* thaiVerified) {
@@ -335,29 +338,9 @@ static void loadScam() {
   anyWord(REMOTE_APPS, [](const char* w) { if (numRemote < MAX_REMOTE) remoteHash[numRemote++] = fnv40(w, strlen(w)); return false; });
   File f = LittleFS.open("/scam.cfg", "r");
   if (f) { scamRemoteOn = f.readStringUntil('\n').toInt() != 0; scamBankOn = f.readStringUntil('\n').toInt() != 0; f.close(); }
-  numAllow = 0; f = LittleFS.open("/allow.txt", "r"); if (!f) return;
-  while (f.available() && numAllow < MAX_ALLOW) {
-    String l = f.readStringUntil('\n'); l.trim(); l.toLowerCase();
-    if (l.length() && l.indexOf('.') > 0) { allowDom[numAllow] = l; allowHash[numAllow] = fnv40(l.c_str(), l.length()); numAllow++; }
-  }
-  f.close();
 }
 static void saveScam() { File f = LittleFS.open("/scam.cfg", "w"); if (!f) return; f.println(scamRemoteOn ? 1 : 0); f.println(scamBankOn ? 1 : 0); f.close(); }
-static void saveAllow() { File f = LittleFS.open("/allow.txt", "w"); if (!f) return; for (int i = 0; i < numAllow; i++) f.println(allowDom[i]); f.close(); }
-static bool addAllow(String d) {
-  d.trim(); d.toLowerCase(); if (d.startsWith("www.")) d = d.substring(4);
-  if (!d.length() || d.indexOf('.') < 0 || numAllow >= MAX_ALLOW) return false;
-  for (int i = 0; i < numAllow; i++) if (allowDom[i] == d) return false;
-  removeCustom(d);                                   // allowing beats an older custom block
-  allowDom[numAllow] = d; allowHash[numAllow] = fnv40(d.c_str(), d.length()); numAllow++; saveAllow(); return true;
-}
-static void removeAllow(String d) {
-  d.toLowerCase();
-  for (int i = 0; i < numAllow; i++) if (allowDom[i] == d) {
-    for (int j = i; j < numAllow - 1; j++) { allowDom[j] = allowDom[j+1]; allowHash[j] = allowHash[j+1]; }
-    numAllow--; saveAllow(); return;
-  }
-}
+static bool addAllow(const String& d) { customList.remove(d); return allowList.add(d); }   // allowing beats an older custom block
 
 static bool isBannedIP(uint32_t ip) { for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) return true; return false; }
 static void loadBanned() {
@@ -381,10 +364,10 @@ static void getMac(uint32_t ip, uint8_t* mac) {
     if (etharp_find_addr(nif, &ipa, &eth, &ipret) >= 0 && eth) { memcpy(mac, eth->addr, 6); return; }
 }
 static Dev* getClient(uint32_t ip) {
-  for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) { clients[i].lastSeen = millis(); return &clients[i]; }
+  for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) return &clients[i];
   if (numClients < MAX_CLIENTS) {
     Dev* c = &clients[numClients++];
-    c->ip = ip; c->blocked = c->allowed = 0; c->lastSeen = millis(); c->banned = isBannedIP(ip);
+    c->ip = ip; c->blocked = c->allowed = 0; c->banned = isBannedIP(ip);
     getMac(ip, c->mac); return c;
   }
   return nullptr;
@@ -482,8 +465,6 @@ static bool handleDns() {
 }
 
 // ---------- web ----------
-static String macStr(const uint8_t* m) { char s[18]; snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", m[0],m[1],m[2],m[3],m[4],m[5]); return String(s); }
-static String jesc(const String& s) { String o; for (char ch : s) { if (ch == '"' || ch == '\\') o += '\\'; o += ch; } return o; }
 // HTML text/attribute escaping for the setup portal: a scanned SSID or the submitted
 // WiFi name is attacker-controllable during provisioning (the portal AP is open).
 static String htmlEscape(const String& s) {
@@ -503,39 +484,82 @@ static String htmlEscape(const String& s) {
 
 #include "page.h"   // dashboard HTML (PROGMEM)
 
+// Streams a response in 256-byte chunks, so the stats JSON never needs one big heap
+// block however many devices and domains it lists (the dashboard polls it every 3 s).
+struct ChunkOut {
+  char b[256]; size_t n = 0;
+  void flush() { if (n) { web.sendContent(b, n); n = 0; } }
+  void raw(const char* s, size_t l) {
+    while (l) { size_t k = min(l, sizeof(b) - n); memcpy(b + n, s, k); n += k; s += k; l -= k; if (n == sizeof(b)) flush(); }
+  }
+  void lit(PGM_P s) { for (char c; (c = pgm_read_byte(s++)); ) raw(&c, 1); }      // PROGMEM literal
+  void str(const char* s) {                                                    // JSON string
+    raw("\"", 1);
+    for (; *s; s++) { if (*s == '"' || *s == '\\') raw("\\", 1); if ((uint8_t)*s >= 0x20) raw(s, 1); }
+    raw("\"", 1);
+  }
+  void num(int32_t v) { char t[12]; raw(t, snprintf(t, sizeof(t), "%d", (int)v)); }
+  void unum(uint32_t v) { char t[12]; raw(t, snprintf(t, sizeof(t), "%u", (unsigned)v)); }
+  void boolean(bool v) { if (v) lit(PSTR("true")); else lit(PSTR("false")); }
+  void ip(uint32_t v) { IPAddress a(v); char t[16]; raw(t, snprintf(t, sizeof(t), "\"%u.%u.%u.%u\"", a[0], a[1], a[2], a[3])); }
+};
+#define J(s) o.lit(PSTR(s))
+
 static void handleStats() {
-  uint32_t up = millis() / 1000;
-  char ut[24]; snprintf(ut, sizeof(ut), "%ud %uh %um", (unsigned)(up/86400), (unsigned)((up%86400)/3600), (unsigned)((up%3600)/60));
-  String j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked + ",\"allowed\":" + totalAllowed +
-             ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() +
-             ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
-             ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
-             ",\"blocking\":" + (blockingOn ? "true" : "false") +
-             ",\"ssid\":\"" + jesc(WiFi.SSID()) + "\",\"boot\":\"" + jesc(ESP.getResetReason()) + "\"" +
-             ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0) +
-             ",\"defcreds\":" + ((strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0) ? "true" : "false") +
-             ",\"clients\":[";
-  for (int i = 0; i < numClients; i++) { Dev& c = clients[i]; IPAddress ip(c.ip);
-    j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
-  j += "],\"custom\":[";
-  for (int i = 0; i < numCustom; i++) { j += (i ? "," : ""); j += "\"" + jesc(customDom[i]) + "\""; }
-  j += "],\"allow\":[";
-  for (int i = 0; i < numAllow; i++) { j += (i ? "," : ""); j += "\"" + jesc(allowDom[i]) + "\""; }
-  j += String("],\"scam\":{\"remote\":") + (scamRemoteOn ? "true" : "false") + ",\"bank\":" + (scamBankOn ? "true" : "false") +
-       ",\"blocked\":" + scamBlocked + ",\"hits\":[";
-  for (int i = 0; i < numHits; i++) { IPAddress ip(hits[i].ip);
-    j += (i ? "," : ""); j += "{\"d\":\"" + jesc(hits[i].d) + "\",\"ip\":\"" + ip.toString() + "\",\"k\":" + hits[i].kind +
-                              ",\"ago\":" + (uint32_t)((millis() - hits[i].at) / 1000) + "}"; }
-  j += "]}}";
-  web.send(200, "application/json", j);
+  web.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  web.send(200, "application/json", "");
+  ChunkOut o;
+  J("{\"ip\":"); o.ip((uint32_t)WiFi.localIP());
+  J(",\"ssid\":"); o.str(WiFi.SSID().c_str());
+  J(",\"rssi\":"); o.num(WiFi.RSSI());
+  J(",\"up\":"); o.unum(millis() / 1000);
+  J(",\"heap\":"); o.unum(ESP.getFreeHeap());
+  J(",\"maxblock\":"); o.unum(ESP.getMaxFreeBlockSize());
+  J(",\"frag\":"); o.unum(ESP.getHeapFragmentation());
+  J(",\"boot\":"); o.str(ESP.getResetReason().c_str());
+  J(",\"blocked\":"); o.unum(totalBlocked);
+  J(",\"allowed\":"); o.unum(totalAllowed);
+  J(",\"domains\":"); o.unum(numHashes);
+  J(",\"blocking\":"); o.boolean(blockingOn);
+  J(",\"resumeIn\":"); o.unum(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0);
+  J(",\"defcreds\":"); o.boolean(strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0);
+  J(",\"upurl\":"); o.str(updateUrl.c_str());
+  J(",\"upiv\":"); o.unum(updateIntervalH);
+  J(",\"upstat\":"); o.str(updateStatus.c_str());
+  J(",\"clients\":[");
+  for (int i = 0; i < numClients; i++) {
+    const Dev& c = clients[i]; char mac[20];
+    snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", c.mac[0], c.mac[1], c.mac[2], c.mac[3], c.mac[4], c.mac[5]);
+    if (i) J(",");
+    J("{\"ip\":"); o.ip(c.ip); J(",\"mac\":"); o.str(mac);
+    J(",\"blocked\":"); o.unum(c.blocked); J(",\"allowed\":"); o.unum(c.allowed);
+    J(",\"banned\":"); o.boolean(c.banned); J("}");
+  }
+  bool first = true;
+  J("],\"custom\":["); customList.each([&](const char* d) { if (!first) J(","); first = false; o.str(d); });
+  first = true;
+  J("],\"allow\":[");  allowList.each([&](const char* d) { if (!first) J(","); first = false; o.str(d); });
+  J("],\"scam\":{\"remote\":"); o.boolean(scamRemoteOn);
+  J(",\"bank\":"); o.boolean(scamBankOn);
+  J(",\"blocked\":"); o.unum(scamBlocked);
+  J(",\"hits\":[");
+  for (int i = 0; i < numHits; i++) {
+    if (i) J(",");
+    J("{\"d\":"); o.str(hits[i].d); J(",\"ip\":"); o.ip(hits[i].ip);
+    J(",\"k\":"); o.unum(hits[i].kind); J(",\"ago\":"); o.unum((millis() - hits[i].at) / 1000); J("}");
+  }
+  J("]}}");
+  o.flush();
+  web.sendContent("");                               // end of chunked response
 }
+#undef J
 // Every state-changing endpoint needs Basic Auth plus a custom header. Browsers replay
 // cached Basic Auth on cross-site <img>/<form> requests, but those can't set a custom
 // header (only the dashboard's own same-origin fetch() can), which blocks drive-by CSRF.
 static const char* CSRF_HEADER = "X-Requested-With";
 static const char* CSRF_VALUE  = "esp-adblock";
 static bool requireAuth() {
-  if (web.header(CSRF_HEADER) != CSRF_VALUE) { web.send(403, "text/plain", "missing CSRF header"); return false; }
+  if (web.header(CSRF_HEADER) != CSRF_VALUE) { web.send_P(403, PSTR("text/plain"), PSTR("missing CSRF header")); return false; }
   if (web.authenticate(WEB_USER, WEB_PASS)) return true;
   web.requestAuthentication();
   return false;
@@ -543,7 +567,7 @@ static bool requireAuth() {
 static void handleBan() {
   if (!requireAuth()) return;
   IPAddress ip; if (ip.fromString(web.arg("ip"))) { Dev* c = getClient((uint32_t)ip); if (c) { c->banned = !c->banned; saveBanned(); } }
-  web.send(200, "text/plain", "ok");
+  web.send_P(200, PSTR("text/plain"), PSTR("ok"));
 }
 
 // ---------- blocklist swap (shared by upload + remote fetch) ----------
@@ -576,18 +600,18 @@ static bool upAuthOk = false;
 static File upFile;
 static void handleUploadDone() {
   if (!upAuthOk) { web.requestAuthentication(); return; }
-  web.send(upOk ? 200 : 500, "text/plain",
-           upOk ? "ok" : "rejected: empty or size not a multiple of 5 (not a blocklist.bin?)");
+  if (upOk) web.send_P(200, PSTR("text/plain"), PSTR("ok"));
+  else web.send_P(500, PSTR("text/plain"), PSTR("rejected: empty or size not a multiple of 5 (not a blocklist.bin?)"));
 }
 static void handleUpload() {
   HTTPUpload& u = web.upload();
   switch (u.status) {
     case UPLOAD_FILE_START:
       upAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, WEB_PASS);
-      if (!upAuthOk) { Serial.println("[ota] blocklist upload: auth/CSRF check failed"); break; }
+      if (!upAuthOk) { Serial.println(F("[ota] blocklist upload: auth/CSRF check failed")); break; }
       upOk = false; beginBlocklistSwap();
       upFile = LittleFS.open("/blocklist.new", "w");
-      Serial.printf("[ota] receiving %s\n", u.filename.c_str());
+      Serial.printf_P(PSTR("[ota] receiving %s\n"), u.filename.c_str());
       break;
     case UPLOAD_FILE_WRITE:
       if (upAuthOk && upFile) upFile.write(u.buf, u.currentSize);
@@ -596,13 +620,13 @@ static void handleUpload() {
       if (!upAuthOk) break;
       if (upFile) upFile.close();
       upOk = commitNewBlocklist();
-      Serial.printf("[ota] %s -> %u domains\n", upOk ? "OK" : "REJECTED", (unsigned)numHashes);
+      Serial.printf_P(PSTR("[ota] %s -> %u domains\n"), upOk ? "OK" : "REJECTED", (unsigned)numHashes);
       break;
     case UPLOAD_FILE_ABORTED:
       if (!upAuthOk) break;
       if (upFile) upFile.close();
       LittleFS.remove("/blocklist.new"); reopenBlocklist();
-      Serial.println("[ota] aborted");
+      Serial.println(F("[ota] aborted"));
       break;
   }
 }
@@ -620,7 +644,7 @@ static void saveUpdateCfg() {
 }
 static bool fetchBlocklist(String url) {
   url.trim(); if (!url.length()) { updateStatus = "no url set"; return false; }
-  Serial.printf("[remote] GET %s (heap %u)\n", url.c_str(), (unsigned)ESP.getFreeHeap());
+  Serial.printf_P(PSTR("[remote] GET %s (heap %u)\n"), url.c_str(), (unsigned)ESP.getFreeHeap());
   BearSSL::WiFiClientSecure cs; cs.setInsecure();   // blocklist isn't secret -> skip cert pinning
   WiFiClient cl;
   HTTPClient http; http.setTimeout(20000);
@@ -628,7 +652,7 @@ static bool fetchBlocklist(String url) {
   bool https = url.startsWith("https");
   if (!(https ? http.begin(cs, url) : http.begin(cl, url))) { updateStatus = "begin failed"; return false; }
   int code = http.GET();
-  if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code); Serial.printf("[remote] %s\n", updateStatus.c_str()); return false; }
+  if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code); Serial.printf_P(PSTR("[remote] %s\n"), updateStatus.c_str()); return false; }
   beginBlocklistSwap();
   File f = LittleFS.open("/blocklist.new", "w");
   if (!f) { http.end(); updateStatus = "fs open failed"; reopenBlocklist(); return false; }
@@ -642,7 +666,7 @@ static bool fetchBlocklist(String url) {
   f.close(); http.end();
   bool ok = commitNewBlocklist();
   updateStatus = ok ? ("ok: " + String(numHashes) + " domains") : ("bad data (" + String(total) + "B)");
-  Serial.printf("[remote] %s\n", updateStatus.c_str());
+  Serial.printf_P(PSTR("[remote] %s\n"), updateStatus.c_str());
   return ok;
 }
 
@@ -651,15 +675,16 @@ static bool fwAuthOk = false;
 static void handleFwUpdateDone() {
   if (!fwAuthOk) { web.requestAuthentication(); return; }
   bool ok = !Update.hasError();
-  web.send(ok ? 200 : 500, "text/plain", ok ? "ok, rebooting" : "firmware update failed");
+  if (ok) web.send_P(200, PSTR("text/plain"), PSTR("ok, rebooting"));
+  else web.send_P(500, PSTR("text/plain"), PSTR("firmware update failed"));
   if (ok) { delay(300); ESP.restart(); }
 }
 static void handleFwUpload() {
   HTTPUpload& u = web.upload();
   if (u.status == UPLOAD_FILE_START) {
     fwAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, WEB_PASS);
-    if (!fwAuthOk) { Serial.println("[fw-ota] auth/CSRF check failed, rejecting flash"); return; }
-    Serial.printf("[fw-ota] %s\n", u.filename.c_str());
+    if (!fwAuthOk) { Serial.println(F("[fw-ota] auth/CSRF check failed, rejecting flash")); return; }
+    Serial.printf_P(PSTR("[fw-ota] %s\n"), u.filename.c_str());
     // The new image is staged in the free space after the running sketch.
     uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
     if (!Update.begin(maxSketchSpace, U_FLASH)) Update.printError(Serial);
@@ -668,11 +693,11 @@ static void handleFwUpload() {
     if (Update.write(u.buf, u.currentSize) != u.currentSize) Update.printError(Serial);
   } else if (u.status == UPLOAD_FILE_END) {
     if (!fwAuthOk) return;
-    if (Update.end(true)) Serial.printf("[fw-ota] %u bytes OK\n", (unsigned)u.totalSize);
+    if (Update.end(true)) Serial.printf_P(PSTR("[fw-ota] %u bytes OK\n"), (unsigned)u.totalSize);
     else Update.printError(Serial);
   } else if (u.status == UPLOAD_FILE_ABORTED) {
     if (!fwAuthOk) return;
-    Update.end(); Serial.println("[fw-ota] aborted");
+    Update.end(); Serial.println(F("[fw-ota] aborted"));
   }
 }
 
@@ -700,12 +725,12 @@ static bool hasCreds() {
   return ss.length() > 0 || (WIFI_SSID && *WIFI_SSID && strcmp(WIFI_SSID, "YOUR_WIFI_SSID") != 0);
 }
 static bool joinWiFi(const char* ssid, const char* pass, const char* source) {
-  Serial.printf("WiFi: connecting to \"%s\" (%s)\n", ssid, source);
+  Serial.printf_P(PSTR("WiFi: connecting to \"%s\" (%s)\n"), ssid, source);
   WiFi.mode(WIFI_STA); WiFi.setSleepMode(WIFI_NONE_SLEEP); WiFi.hostname(HOSTNAME);
   WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, pass);
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 30000) { delay(250); Serial.print("."); }
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 30000) { delay(250); Serial.print(F(".")); }
   Serial.println();
   return WiFi.status() == WL_CONNECTED;
 }
@@ -721,28 +746,39 @@ static bool connectWiFi() {
   return true;
 }
 
+// Setup portal pages live in flash (PROGMEM); only the scanned network list is built in RAM.
+static const char PORTAL_HEAD[] PROGMEM =
+  "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+  "<title>AdBlock setup</title><style>"
+  ":root{--bg:#fafafa;--fg:#18181b;--mut:#71717a;--line:#e4e4e7;--card:#fff}"
+  "@media(prefers-color-scheme:dark){:root{--bg:#09090b;--fg:#fafafa;--mut:#a1a1aa;--line:#27272a;--card:#18181b}}"
+  "body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,sans-serif}"
+  "main{max-width:380px;margin:12vh auto;padding:0 20px}h1{font-size:22px;margin:0 0 6px}p{color:var(--mut);margin:0 0 24px}"
+  "input,button{display:block;width:100%;box-sizing:border-box;font:inherit;padding:13px 14px;border-radius:12px;margin:0 0 10px}"
+  "input{border:1px solid var(--line);background:var(--card);color:var(--fg)}"
+  "button{border:0;background:var(--fg);color:var(--bg);font-weight:600;cursor:pointer;margin-top:6px}"
+  "</style></head><body><main><h1>Connect AdBlock</h1><p>Choose your home WiFi (2.4&nbsp;GHz). The box restarts and joins it.</p>"
+  "<form method=POST action=/wifisave><input list=nets name=s placeholder='WiFi name' required autocomplete=off><datalist id=nets>";
+static const char PORTAL_TAIL[] PROGMEM =
+  "</datalist><input name=p type=password placeholder='Password'><button>Connect</button></form></main></body></html>";
+static const char SAVED_HEAD[] PROGMEM =
+  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+  "<body style='font:16px/1.6 system-ui,sans-serif;text-align:center;margin:20vh 20px'><h2>Saved</h2><p>Joining <b>";
+static const char SAVED_TAIL[] PROGMEM =
+  "</b>&hellip;<br>Reconnect your phone to your normal WiFi, then open <b>adblock.local</b>.</p></body>";
+
 static void handlePortalRoot() {
-  String html =
-    "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>ESP8266 AdBlock setup</title>"
-    "<body style='font:16px system-ui,sans-serif;max-width:420px;margin:36px auto;padding:0 16px;background:#0d1117;color:#c9d1d9'>"
-    "<h2>&#128737; ESP8266 AdBlock &mdash; WiFi setup</h2>"
-    "<p style='color:#8b949e'>Pick your network and enter its password. The device restarts and joins it.</p>"
-    "<form method=POST action=/wifisave>"
-    "<input list=nets name=s placeholder='WiFi name' required style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
-    "<datalist id=nets>" + portalOpts + "</datalist>"
-    "<input name=p type=password placeholder='Password' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
-    "<button style='width:100%;padding:12px;margin-top:8px;border-radius:6px;border:0;background:#3fb950;color:#000;font-weight:600;cursor:pointer'>Connect</button>"
-    "</form></body>";
-  web.send(200, "text/html", html);
+  web.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  web.send(200, "text/html", "");
+  web.sendContent_P(PORTAL_HEAD); web.sendContent(portalOpts); web.sendContent_P(PORTAL_TAIL); web.sendContent("");
 }
 static void handleWifiSave() {
   String ss = web.arg("s"), pw = web.arg("p");
-  if (!ss.length()) { web.send(400, "text/plain", "missing WiFi name"); return; }
+  if (!ss.length()) { web.send_P(400, PSTR("text/plain"), PSTR("missing WiFi name")); return; }
   saveCreds(ss, pw);
-  web.send(200, "text/html", "<!doctype html><meta charset=utf-8><body style='font:16px system-ui;text-align:center;margin-top:60px'>"
-                             "&#9989; Saved. Restarting and joining <b>" + htmlEscape(ss) + "</b>&hellip;<br><br>"
-                             "Reconnect your phone to your normal WiFi, then find the box at <b>" + HOSTNAME + ".local</b>.</body>");
+  web.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  web.send(200, "text/html", "");
+  web.sendContent_P(SAVED_HEAD); web.sendContent(htmlEscape(ss)); web.sendContent_P(SAVED_TAIL); web.sendContent("");
   delay(900); ESP.restart();
 }
 // Never returns — blocks in the portal loop until creds are saved (then reboots).
@@ -760,7 +796,7 @@ static void startConfigPortal() {
   web.on("/wifisave", HTTP_POST, handleWifiSave);
   web.onNotFound(handlePortalRoot);            // any captive-portal probe -> the form
   web.begin();
-  Serial.printf("\n[setup] No WiFi. Join open network \"%s\" and a setup page pops up (or http://%s)\n",
+  Serial.printf_P(PSTR("\n[setup] No WiFi. Join open network \"%s\" and a setup page pops up (or http://%s)\n"),
                 ap, apIP.toString().c_str());
   // A configured device that merely failed to join (router rebooting, weak signal) must not
   // get stuck here (e.g. the board came back from a power cut before the router did):
@@ -770,7 +806,7 @@ static void startConfigPortal() {
   while (true) {
     dnsPortal.processNextRequest(); web.handleClient(); delay(2);
     if (WiFi.softAPgetStationNum() > 0) t0 = millis();          // someone is setting it up
-    if (configured && millis() - t0 > 60000UL) { Serial.println("[setup] retrying WiFi"); ESP.restart(); }
+    if (configured && millis() - t0 > 60000UL) { Serial.println(F("[setup] retrying WiFi")); ESP.restart(); }
   }
 }
 
@@ -786,61 +822,61 @@ static void checkForgetButton() {
     delay(10);
   }
   digitalWrite(LED_BUILTIN, HIGH);             // LED is active-low: off
-  if (pressed) { clearCreds(); Serial.println("[setup] FLASH pressed -> cleared saved WiFi"); }
+  if (pressed) { clearCreds(); Serial.println(F("[setup] FLASH pressed -> cleared saved WiFi")); }
 }
 
 void setup() {
   Serial.begin(115200); delay(300);
-  Serial.println("\n[esp8266-adblock] booting");
+  Serial.println(F("\n[esp8266-adblock] booting"));
   WiFi.persistent(false);                      // WiFi.begin() must not rewrite the flash config each boot
   if (!LittleFS.begin()) {
-    Serial.println("LittleFS mount failed -> formatting");
+    Serial.println(F("LittleFS mount failed -> formatting"));
     LittleFS.format(); LittleFS.begin();
   }
   blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
   if (blocklist) {
     numHashes = blocklist.size() / HASH_BYTES;
-    Serial.printf("blocklist: %u domains\n", (unsigned)numHashes);
+    Serial.printf_P(PSTR("blocklist: %u domains\n"), (unsigned)numHashes);
     buildFlashIndex();
   }
-  loadCustom(); loadBanned(); loadUpdateCfg(); loadScam();
-  Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
+  customList.load(); allowList.load(); loadBanned(); loadUpdateCfg(); loadScam();
+  Serial.printf_P(PSTR("custom: %d, allowed: %d, banned: %d\n"), customList.count, allowList.count, numBanned);
 
-  Serial.println("press FLASH within 3 s to forget saved WiFi");
+  Serial.println(F("press FLASH within 3 s to forget saved WiFi"));
   checkForgetButton();
 
   if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
-  Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
-  if (MDNS.begin(HOSTNAME)) { MDNS.addService("http", "tcp", 80); Serial.printf("dashboard: http://%s.local\n", HOSTNAME); }
+  Serial.printf_P(PSTR("WiFi up: %s\n"), WiFi.localIP().toString().c_str());
+  if (MDNS.begin(HOSTNAME)) { MDNS.addService("http", "tcp", 80); Serial.printf_P(PSTR("dashboard: http://%s.local\n"), HOSTNAME); }
 
   if (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0)
-    Serial.println("[WARN] secrets.h still has placeholder WEB_PASS/OTA_PASS — those are public "
+    Serial.println(F("[WARN] secrets.h still has placeholder WEB_PASS/OTA_PASS — those are public "
                     "(they're in the repo's example file). Set real values before trusting this "
-                    "device on a network you don't fully control.");
+                    "device on a network you don't fully control."));
 
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
   web.collectHeaders(CSRF_HEADER);  // needed for requireAuth()'s CSRF check
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
   web.on("/ban", handleBan);
-  web.on("/addblock", []() { if (!requireAuth()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
-  web.on("/unblock", []() { if (!requireAuth()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
-  web.on("/allow", []() { if (!requireAuth()) return; addAllow(web.arg("d")); web.send(200, "text/plain", "ok"); });
-  web.on("/unallow", []() { if (!requireAuth()) return; removeAllow(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/addblock", []() { if (!requireAuth()) return; customList.add(web.arg("d")); web.send_P(200, PSTR("text/plain"), PSTR("ok")); });
+  web.on("/unblock", []() { if (!requireAuth()) return; customList.remove(web.arg("d")); web.send_P(200, PSTR("text/plain"), PSTR("ok")); });
+  web.on("/allow", []() { if (!requireAuth()) return; addAllow(web.arg("d")); web.send_P(200, PSTR("text/plain"), PSTR("ok")); });
+  web.on("/unallow", []() { if (!requireAuth()) return; allowList.remove(web.arg("d")); web.send_P(200, PSTR("text/plain"), PSTR("ok")); });
   web.on("/scamset", []() {                  // /scamset?remote=0|1&bank=0|1
     if (!requireAuth()) return;
     if (web.hasArg("remote")) scamRemoteOn = web.arg("remote") == "1";
     if (web.hasArg("bank"))   scamBankOn   = web.arg("bank") == "1";
-    saveScam(); web.send(200, "text/plain", "ok");
+    saveScam(); web.send_P(200, PSTR("text/plain"), PSTR("ok"));
   });
   web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)
     if (!requireAuth()) return;
     long s = web.hasArg("s") ? web.arg("s").toInt() : 0;
     blockingOn = false; resumeAt = (s > 0) ? millis() + (uint32_t)s * 1000UL : 0;
-    web.send(200, "text/plain", "paused");
+    web.send_P(200, PSTR("text/plain"), PSTR("paused"));
   });
-  web.on("/resume", []() { if (!requireAuth()) return; blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
-  web.on("/forgetwifi", []() { if (!requireAuth()) return; web.send(200, "text/plain", "cleared — rebooting into setup portal");
+  web.on("/resume", []() { if (!requireAuth()) return; blockingOn = true; resumeAt = 0; web.send_P(200, PSTR("text/plain"), PSTR("resumed")); });
+  web.on("/forgetwifi", []() { if (!requireAuth()) return; web.send_P(200, PSTR("text/plain"), PSTR("cleared — rebooting into setup portal"));
     clearCreds(); delay(500); ESP.restart(); });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA (auth inside handleUpload)
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);  // firmware OTA (auth inside handleFwUpload)
@@ -849,13 +885,13 @@ void setup() {
     if (!requireAuth()) return;
     if (web.hasArg("u")) updateUrl = web.arg("u");
     if (web.hasArg("h")) { updateIntervalH = web.arg("h").toInt(); if (updateIntervalH < 1) updateIntervalH = 1; }
-    saveUpdateCfg(); web.send(200, "text/plain", "ok");
+    saveUpdateCfg(); web.send_P(200, PSTR("text/plain"), PSTR("ok"));
   });
   web.begin();
   ArduinoOTA.setHostname(HOSTNAME);      // pio run -t upload --upload-port adblock.local
   ArduinoOTA.setPassword(OTA_PASS);
   ArduinoOTA.begin();
-  Serial.printf("DNS :53 + dashboard :80 + OTA up (free heap %u)\n", (unsigned)ESP.getFreeHeap());
+  Serial.printf_P(PSTR("DNS :53 + dashboard :80 + OTA up (free heap %u)\n"), (unsigned)ESP.getFreeHeap());
 }
 
 // Unattended 24/7 operation: the SDK reconnects on its own after short drops, but if the
@@ -864,9 +900,9 @@ void setup() {
 static void selfHeal() {
   static uint32_t wifiLostAt = 0;
   if (WiFi.status() == WL_CONNECTED) wifiLostAt = 0;
-  else if (wifiLostAt == 0) { wifiLostAt = millis(); Serial.println("[heal] WiFi lost, waiting for reconnect"); }
-  else if (millis() - wifiLostAt > WIFI_LOST_REBOOT_MS) { Serial.println("[heal] WiFi still down -> reboot"); ESP.restart(); }
-  if (ESP.getFreeHeap() < MIN_FREE_HEAP) { Serial.println("[heal] low heap -> reboot"); ESP.restart(); }
+  else if (wifiLostAt == 0) { wifiLostAt = millis(); Serial.println(F("[heal] WiFi lost, waiting for reconnect")); }
+  else if (millis() - wifiLostAt > WIFI_LOST_REBOOT_MS) { Serial.println(F("[heal] WiFi still down -> reboot")); ESP.restart(); }
+  if (ESP.getFreeHeap() < MIN_FREE_HEAP) { Serial.println(F("[heal] low heap -> reboot")); ESP.restart(); }
 }
 
 void loop() {
