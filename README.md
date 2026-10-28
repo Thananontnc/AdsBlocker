@@ -160,8 +160,9 @@ To forget WiFi, press **FLASH** (GPIO0) within 3 s of boot while the LED blinks,
 ## Make the whole home use it
 
 1. Give the board a fixed IP (DHCP reservation for its MAC), then in the router's
-   **LAN / DHCP** settings set the primary DNS to the board's IP and leave the secondary
-   empty (a second resolver lets devices skip the board). Don't change the WAN DNS: then
+   **LAN / DHCP** settings set the primary DNS to the board's IP. Leave the secondary
+   empty, or set it to a [second board](#two-boards) — never to a public DNS such as
+   8.8.8.8, which lets devices skip the blocking. Don't change the WAN DNS: then
    every lookup comes from the router and the Devices list shows only one device.
    No router reset is needed; devices switch when they reconnect.
 2. Turn off browser *Secure DNS* (Chrome/Edge/Firefox/Brave) and Android *Private DNS*.
@@ -170,6 +171,27 @@ To forget WiFi, press **FLASH** (GPIO0) within 3 s of boot while the LED blinks,
 
 If the board is unplugged or broken, devices can't look up any site. To go back, clear the
 DNS fields in the router's DHCP settings and reconnect the devices.
+
+### Two boards
+
+A second ESP8266 can run alongside the first as the router's **secondary DNS**, so the
+house stays online and filtered if one board crashes, restarts or loses power. Both
+answer at the same time; each device picks one (often the primary, switching when it
+doesn't answer).
+
+```bash
+pio run -e nodemcuv2_backup -t upload   --upload-port /dev/cu.usbserial-XXXX
+pio run -e nodemcuv2_backup -t uploadfs --upload-port /dev/cu.usbserial-XXXX
+```
+
+The backup is the same firmware with the dashboard at **http://adblock2.local**. Give it
+its own DHCP reservation and put its IP in the router's secondary DNS field. Firmware
+updates use `.pio/build/nodemcuv2_backup/firmware.bin`.
+
+The boards don't sync. Add custom blocks, allowed sites and scam switches on **both**
+dashboards (or add them to `data/custom.txt`); stats, Devices and Activity are split
+between them, and *Block device* only stops lookups that go to that board. Plug the two
+into different chargers so one bad adapter can't take both down.
 
 DNS can't remove ads inside YouTube, Facebook, Instagram, TikTok, LINE, or the Shopee/Lazada
 apps (they come from the same servers as the content). It also doesn't cover phones on

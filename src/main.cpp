@@ -34,7 +34,10 @@
 #endif
 static const IPAddress UPSTREAM(UPSTREAM_IP);
 static const uint16_t DNS_PORT = 53;
-static const char* HOSTNAME = "adblock";          // -> http://adblock.local
+#ifndef ADBLOCK_HOSTNAME
+#define ADBLOCK_HOSTNAME "adblock"
+#endif
+static const char* HOSTNAME = ADBLOCK_HOSTNAME;    // -> http://adblock.local (backup board: adblock2)
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
 static const int HASH_BYTES = 5;
 static const uint64_t HASH_MASK = (1ULL << (HASH_BYTES * 8)) - 1;
