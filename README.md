@@ -48,14 +48,15 @@ curl -H "X-Pin: <PIN>" http://adblock.local/stats.json
 ## Family preset (what the board runs)
 
 Hagezi Pro (ads/trackers) + NSFW (porn) + Gambling mini + Fake (fake shops/scams) + TIF mini
-(phishing/malware/scam) + Pop-up ads + Perflyst SmartTV and Android tracking (TV ACR such
-as Samba TV on TCL). That's about 549k domains / 2.6 MB:
+(phishing/malware/scam) + Pop-up ads + DoH/VPN/Proxy bypass + Perflyst SmartTV and Android
+tracking (TV ACR such as Samba TV on TCL). That's about 566k domains / 2.7 MB:
 
 ```bash
 H=https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard
 python3 tools/build_blocklist.py data/blocklist.bin \
   $H/pro-onlydomains.txt $H/nsfw-onlydomains.txt $H/gambling.mini-onlydomains.txt \
   $H/fake-onlydomains.txt $H/tif.mini-onlydomains.txt $H/popupads-onlydomains.txt \
+  $H/doh-vpn-proxy-bypass-onlydomains.txt \
   https://raw.githubusercontent.com/Perflyst/PiHoleBlocklist/master/SmartTV.txt \
   https://raw.githubusercontent.com/Perflyst/PiHoleBlocklist/master/android-tracking.txt
 ```
@@ -63,6 +64,14 @@ python3 tools/build_blocklist.py data/blocklist.bin \
 Upload the result from the dashboard (*Settings → Blocklist → Upload*) or with
 `pio run -t uploadfs`. Don't set the *Automatic blocklist update* URL to upstream's release
 asset while using this preset: it would replace the list with upstream's smaller one.
+
+The bypass list stops devices from skipping the box: encrypted DNS (Chrome/Edge/Firefox
+*Secure DNS*, Android *Private DNS* set to a provider such as `dns.google`), VPN and proxy
+apps, and **iCloud Private Relay**. For Private Relay the box answers with no address, as
+Apple asks networks to, so iPhones and Macs show *"Private Relay is turned off for this
+network"* and use the box. A device with Secure DNS or Private DNS forced on can't load
+sites until it's switched back to automatic. If someone needs a VPN for work, add its
+domain under **Always allowed**.
 
 The firmware also forces **Google SafeSearch, YouTube Restricted Mode (moderate) and Bing
 strict search** (`safeSearchIP()` in `src/main.cpp`).
@@ -215,6 +224,10 @@ mobile data or using a VPN.
   site's own domain. Find the ad host in *Activity* and press *Block*, or add a browser
   blocker such as uBlock Origin for in-page ads.
 - **Devices missing:** see the notes under *Dashboard*.
+- **Blocklist upload fails and *Sites listed* shows 0:** the box restarted mid-upload,
+  usually because it was uploaded right after a restart, while the box is collecting
+  device names and has the least memory. Wait until it has been up 2 minutes and upload
+  again. Until then it doesn't block anything, but the internet keeps working.
 - **Firmware update refused:** the build is over ~515 KB; flash over USB with
   `pio run -t upload`.
 

@@ -557,6 +557,11 @@ static int buildAnswer(int qend, uint16_t qtype, const IPAddress& ip) {
   memcpy(buf + qend, ans, sizeof(ans)); return qend + sizeof(ans);
 }
 
+// iCloud Private Relay hides lookups from the box. Apple devices turn it off for the
+// network (with a notice) only on a negative answer, not on 0.0.0.0, so blocked relay
+// hosts get an empty answer for every type.
+static bool privateRelay(const char* d) { return strcmp(d, "mask.icloud.com") == 0 || strcmp(d, "mask-h2.icloud.com") == 0; }
+
 // Forced SafeSearch / YouTube Restricted Mode: answer the search hosts with the providers'
 // published "safe" addresses (forcesafesearch.google.com, restrictmoderate.youtube.com,
 // strict.bing.com). Those servers present valid certs for the normal hostnames.
@@ -623,7 +628,7 @@ static bool handleDns() {
     }
     int rlen;
     IPAddress safeIP;
-    if (blocked) { rlen = buildAnswer(qend, qtype, IPAddress(0, 0, 0, 0)); totalBlocked++; if (c) c->blocked++; }
+    if (blocked) { rlen = buildAnswer(qend, privateRelay(domain) ? 0 : qtype, IPAddress(0, 0, 0, 0)); totalBlocked++; if (c) c->blocked++; }
     else if (blockingOn && dl && safeSearchIP(domain, safeIP)) { rlen = buildAnswer(qend, qtype, safeIP); totalAllowed++; if (c) c->allowed++; }
     else         { rlen = forwardUpstream(qlen, qend);     totalAllowed++; if (c) c->allowed++; }
     if (rlen > 0) { dnsServer.beginPacket(cip, cport); dnsServer.write(buf, rlen); dnsServer.endPacket(); }
