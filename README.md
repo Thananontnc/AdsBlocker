@@ -22,7 +22,7 @@ it over USB.
 ## Build & flash
 
 ```bash
-cp src/secrets.example.h src/secrets.h      # set WiFi (optional) and WEB_PASS
+cp src/secrets.example.h src/secrets.h      # set WiFi (optional) and WEB_PIN
 python3 tools/build_blocklist.py data/blocklist.bin <sources...>   # see "Family preset"
 pio run -t upload                           # D1 mini: pio run -e d1_mini -t upload
 pio run -t uploadfs                         # writes data/ (blocklist.bin, custom.txt)
@@ -37,8 +37,13 @@ After the first USB flash, everything updates over WiFi from the dashboard:
   *Settings → Firmware*. Settings, lists and WiFi are kept.
 - **Blocklist:** build a new `blocklist.bin` and upload it in *Settings → Blocklist*.
 
-The dashboard login is user `admin` (`WEB_USER`) and the `WEB_PASS` from `src/secrets.h`.
-To change it, edit `secrets.h`, rebuild, and upload the new firmware.
+The dashboard asks for a 6-digit PIN (`WEB_PIN` in `src/secrets.h`), with no username. To
+change it, edit `secrets.h`, rebuild, and upload the new firmware. From a computer:
+
+```bash
+curl -H "X-Pin: <PIN>" -F "f=@.pio/build/nodemcuv2/firmware.bin" http://adblock.local/update
+curl -H "X-Pin: <PIN>" http://adblock.local/stats.json
+```
 
 ## Family preset (what the board runs)
 
@@ -90,7 +95,7 @@ light/dark mode. Five tabs:
   *Resume*, protection switches (remote-control apps, fake bank sites), recent scams stopped
 - **Activity:** the last 64 sites looked up, with the device that asked, how often, and
   whether it was blocked. Filter by device or show blocked only; *Block* / *Allow* acts on
-  the whole site. Needs the dashboard password, and lives in RAM only (cleared on restart).
+  the whole site. Lives in RAM only (cleared on restart).
 - **Devices:** every device using the box, recognized automatically: names that Apple
   devices and TVs announce over Bonjour ("iPad ของ Thananon", "Thananon's MacBook Pro"),
   and the type (iPhone, iPad, Mac, Android, Android TV, Windows PC, smart TV, consoles)
@@ -100,9 +105,10 @@ light/dark mode. Five tabs:
 - **Settings:** address, WiFi, memory, uptime, blocklist upload and auto-update, firmware
   update, forget WiFi
 
-Changes and the Activity tab ask for the dashboard password (user `admin`, password
-`WEB_PASS` from `secrets.h`). The browser's *"password will be sent unencrypted"* note is
-normal for a box without HTTPS: the password only travels inside the home network.
+The dashboard opens with a PIN screen. Type the 6 digits and it unlocks; the phone remembers
+the PIN, so it is asked only once. *Settings → Lock* forgets it on that phone. After 5 wrong
+PINs the box refuses every try for 1 minute. The box has no HTTPS, so the PIN travels
+unencrypted inside the home network: don't reuse it for anything important.
 
 Notes on Devices:
 
@@ -195,7 +201,7 @@ mobile data or using a VPN.
 | Scam protection | no | remote-control apps, fake Thai bank/government sites |
 | Allow list | no | overrides every block |
 | Device names / type | no | Bonjour names + OS from lookups |
-| Activity log | no | last 64 lookups, password-protected |
+| Activity log | no | last 64 lookups, PIN-protected |
 | Firmware update | dashboard + ArduinoOTA | dashboard only (keeps the image under ~515 KB) |
 | Hostname | c3adblock.local | adblock.local |
 

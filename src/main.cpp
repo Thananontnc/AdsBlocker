@@ -632,7 +632,9 @@ struct ChunkOut {
 };
 #define J(s) o.lit(PSTR(s))
 
+static bool requireAuth();
 static void handleStats() {
+  if (!requireAuth()) return;
   web.setContentLength(CONTENT_LENGTH_UNKNOWN);
   web.send(200, "application/json", "");
   ChunkOut o;
@@ -649,7 +651,7 @@ static void handleStats() {
   J(",\"domains\":"); o.unum(numHashes);
   J(",\"blocking\":"); o.boolean(blockingOn);
   J(",\"resumeIn\":"); o.unum(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0);
-  J(",\"defcreds\":"); o.boolean(strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0);
+  J(",\"defcreds\":"); o.boolean(strcmp(WEB_PIN, "123456") == 0);
   J(",\"upurl\":"); o.str(updateUrl.c_str());
   J(",\"upiv\":"); o.unum(updateIntervalH);
   J(",\"upstat\":"); o.str(updateStatus.c_str());
@@ -683,8 +685,7 @@ static void handleStats() {
   o.flush();
   web.sendContent("");                               // end of chunked response
 }
-static bool requireAuth();
-// Lookup log, newest first. Behind the dashboard password: it's the family's browsing.
+// Lookup log, newest first. Behind the dashboard PIN: it's the family's browsing.
 static void handleLog() {
   if (!requireAuth()) return;
   web.setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -703,15 +704,26 @@ static void handleLog() {
   web.sendContent("");
 }
 #undef J
-// Every state-changing endpoint needs Basic Auth plus a custom header. Browsers replay
-// cached Basic Auth on cross-site <img>/<form> requests, but those can't set a custom
-// header (only the dashboard's own same-origin fetch() can), which blocks drive-by CSRF.
-static const char* CSRF_HEADER = "X-Requested-With";
-static const char* CSRF_VALUE  = "esp-adblock";
+// Everything except the page itself needs the dashboard PIN in an X-Pin header. Only the
+// dashboard's own same-origin fetch() can set a custom header, so a cross-site <img>/<form>
+// can't drive it (CSRF). After 5 wrong PINs every try is refused for a minute, which keeps
+// guessing all million 6-digit PINs out of reach.
+static const char* PIN_HEADER = "X-Pin";
+static uint8_t pinFails = 0;
+static uint32_t pinLockAt = 0;
+// 0 = right PIN, 401 = missing or wrong, 429 = locked out
+static int pinCheck() {
+  if (pinLockAt && millis() - pinLockAt < 60000UL) return 429;
+  pinLockAt = 0;
+  String p = web.header(PIN_HEADER);
+  if (p.length() && p == WEB_PIN) { pinFails = 0; return 0; }
+  if (p.length() && ++pinFails >= 5) { pinFails = 0; pinLockAt = millis() | 1; }
+  return 401;
+}
 static bool requireAuth() {
-  if (web.header(CSRF_HEADER) != CSRF_VALUE) { web.send_P(403, PSTR("text/plain"), PSTR("missing CSRF header")); return false; }
-  if (web.authenticate(WEB_USER, WEB_PASS)) return true;
-  web.requestAuthentication();
+  int c = pinCheck(); if (!c) return true;
+  if (c == 429) web.send_P(429, PSTR("text/plain"), PSTR("too many tries, wait 1 min"));
+  else web.send_P(401, PSTR("text/plain"), PSTR("PIN needed"));
   return false;
 }
 static void handleBan() {
@@ -749,7 +761,7 @@ static bool upOk = false;
 static bool upAuthOk = false;
 static File upFile;
 static void handleUploadDone() {
-  if (!upAuthOk) { web.requestAuthentication(); return; }
+  if (!upAuthOk) { web.send_P(401, PSTR("text/plain"), PSTR("PIN needed")); return; }
   if (upOk) web.send_P(200, PSTR("text/plain"), PSTR("ok"));
   else web.send_P(500, PSTR("text/plain"), PSTR("rejected: empty or size not a multiple of 5 (not a blocklist.bin?)"));
 }
@@ -757,8 +769,8 @@ static void handleUpload() {
   HTTPUpload& u = web.upload();
   switch (u.status) {
     case UPLOAD_FILE_START:
-      upAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, WEB_PASS);
-      if (!upAuthOk) { Serial.println(F("[ota] blocklist upload: auth/CSRF check failed")); break; }
+      upAuthOk = pinCheck() == 0;
+      if (!upAuthOk) { Serial.println(F("[ota] blocklist upload: wrong PIN")); break; }
       upOk = false; beginBlocklistSwap();
       upFile = LittleFS.open("/blocklist.new", "w");
       Serial.printf_P(PSTR("[ota] receiving %s\n"), u.filename.c_str());
@@ -823,7 +835,7 @@ static bool fetchBlocklist(String url) {
 // ---------- firmware OTA (browser upload of firmware.bin -> reboot) ----------
 static bool fwAuthOk = false;
 static void handleFwUpdateDone() {
-  if (!fwAuthOk) { web.requestAuthentication(); return; }
+  if (!fwAuthOk) { web.send_P(401, PSTR("text/plain"), PSTR("PIN needed")); return; }
   bool ok = !Update.hasError();
   if (ok) web.send_P(200, PSTR("text/plain"), PSTR("ok, rebooting"));
   else web.send_P(500, PSTR("text/plain"), PSTR("firmware update failed"));
@@ -832,8 +844,8 @@ static void handleFwUpdateDone() {
 static void handleFwUpload() {
   HTTPUpload& u = web.upload();
   if (u.status == UPLOAD_FILE_START) {
-    fwAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, WEB_PASS);
-    if (!fwAuthOk) { Serial.println(F("[fw-ota] auth/CSRF check failed, rejecting flash")); return; }
+    fwAuthOk = pinCheck() == 0;
+    if (!fwAuthOk) { Serial.println(F("[fw-ota] wrong PIN, rejecting flash")); return; }
     Serial.printf_P(PSTR("[fw-ota] %s\n"), u.filename.c_str());
     // The new image is staged in the free space after the running sketch.
     uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
@@ -1002,13 +1014,11 @@ void setup() {
     Serial.printf_P(PSTR("dashboard: http://%s.local\n"), HOSTNAME);
   }
 
-  if (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0)
-    Serial.println(F("[WARN] secrets.h still has placeholder WEB_PASS/OTA_PASS — those are public "
-                    "(they're in the repo's example file). Set real values before trusting this "
-                    "device on a network you don't fully control."));
+  if (strcmp(WEB_PIN, "123456") == 0)
+    Serial.println(F("[WARN] secrets.h still has the example WEB_PIN 123456 — set your own PIN."));
 
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
-  web.collectHeaders(CSRF_HEADER);  // needed for requireAuth()'s CSRF check
+  web.collectHeaders(PIN_HEADER);  // needed for requireAuth()'s PIN check
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
   web.on("/log.json", handleLog);

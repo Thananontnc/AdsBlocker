@@ -1,9 +1,9 @@
 #pragma once
 // Dashboard HTML for the ESP8266 AdBlocker web UI, kept in its own header so the
 // Arduino IDE preprocessor doesn't choke on the inlined markup.
-// Minimal, mobile-first, follows the phone's light/dark setting. Four tabs: Home,
-// Devices, Sites, Settings. Device names live in the viewer's browser (localStorage),
-// so the board spends no RAM on them.
+// Minimal, mobile-first, follows the phone's light/dark setting. Five tabs: Home,
+// Activity, Devices, Sites, Settings, behind a 6-digit PIN. Device names live in the
+// viewer's browser (localStorage), so the board spends no RAM on them.
 
 const char PAGE[] PROGMEM = R"HTML(<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -64,9 +64,12 @@ input[type=file]{font-size:13px;flex:1;min-width:0;width:0;color:var(--mut)}
 .prog{height:3px;background:var(--line);border-radius:9px;overflow:hidden;display:none;margin-bottom:12px}.prog i{display:block;height:100%;width:0;background:var(--fg)}
 #toast{position:fixed;left:50%;bottom:max(20px,env(safe-area-inset-bottom));transform:translate(-50%,16px);opacity:0;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;transition:.2s;pointer-events:none;max-width:90vw;text-align:center;z-index:9}
 #toast.show{opacity:1;transform:translate(-50%,0)}
+#lock{position:fixed;inset:0;background:var(--bg);display:none;place-items:center;text-align:center;z-index:8}#lock.on{display:grid}
+#pin{font:inherit;font-size:30px;letter-spacing:.45em;text-indent:.45em;text-align:center;width:230px;padding:12px;margin-top:8px;border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--fg)}
+#pin:focus{outline:2px solid var(--fg);outline-offset:-1px}#pinE{color:var(--bad);min-height:22px}
 </style></head><body><div class=wrap>
 <header><b>AdBlock</b><span class=pill id=pill><span class=dot></span><span id=pillT>&hellip;</span></span></header>
-<div class=alert id=credwarn>Default passwords are in use. Set WEB_PASS in secrets.h and reflash.</div>
+<div class=alert id=credwarn>The example PIN 123456 is in use. Set WEB_PIN in secrets.h and update the firmware.</div>
 <nav id=nav><button data-t=home class=on>Home</button><button data-t=activity>Activity</button><button data-t=devices>Devices</button><button data-t=sites>Sites</button><button data-t=settings>Settings</button></nav>
 
 <section data-tab=home class=on>
@@ -106,10 +109,15 @@ input[type=file]{font-size:13px;flex:1;min-width:0;width:0;color:var(--mut)}
 <form class=in id=updf style=padding-top:0><input class=tx id=uurl placeholder="https://&hellip;/blocklist.bin"><input class=tx id=uiv type=number min=1 style="flex:0 0 64px" title=hours><button class=b>Save</button></form></div>
 <div class=lbl>Firmware</div><div class=card>
 <form class=in id=fwf><input type=file id=fwb accept=.bin><button class="b p">Flash</button></form><div class=prog id=fwp><i></i></div></div>
+<div class=lbl>Login</div><div class=card><div class=row><div class=t>Lock dashboard<small>Asks for the PIN again on this phone</small></div><button class=b onclick=lock()>Lock</button></div></div>
 <div class=lbl>WiFi</div><div class=card><div class=row><div class=t>Forget WiFi<small>Restarts into setup mode</small></div><button class="b r" onclick=forgetWifi()>Forget</button></div></div>
 </section>
-</div><div id=toast></div><script>
-const $=id=>document.getElementById(id),H={'X-Requested-With':'esp-adblock'};let S=null,tt,list='custom',cur='home',LOG=null,flt='all',DN={};
+</div><div id=lock><div><b style=font-size:18px>AdBlock</b><div class="mut sm">Enter PIN</div><input id=pin type=password inputmode=numeric pattern="[0-9]*" maxlength=6 autocomplete=off aria-label=PIN><div class=sm id=pinE></div></div></div><div id=toast></div><script>
+const $=id=>document.getElementById(id),H=()=>({'X-Pin':PIN});let PIN='',S=null,tt,list='custom',cur='home',LOG=null,flt='all',DN={};
+// PIN is kept on this phone so it only has to be typed once. 401/429 = wrong or locked out.
+function lock(m){PIN='';try{localStorage.removeItem('pin')}catch(e){}$('lock').classList.add('on');$('pinE').textContent=m||'';$('pin').value='';$('pin').focus()}
+function denied(r){if(r.status!=401&&r.status!=429)return false;lock(r.status==429?'Too many tries. Wait 1 minute.':PIN?'Wrong PIN':'');return true}
+$('pin').oninput=e=>{let v=e.target.value.replace(/\D/g,'');e.target.value=v;if(v.length<6)return;PIN=v;try{localStorage.setItem('pin',v)}catch(e){}load()};
 function toast(m){let t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('show'),2400)}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function fmt(n){return Number(n).toLocaleString()}
@@ -125,7 +133,7 @@ return o.join('')}catch(e){return s}}
 function uni(d){return d.split('.').map(l=>l.startsWith('xn--')?pdec(l.slice(4)):l).join('.')}
 function toHost(v){v=v.trim();if(!v)return'';if(!/^[a-z][a-z0-9+.-]*:\/\//i.test(v))v='http://'+v;try{return new URL(v).hostname.replace(/^www\./,'')}catch(e){return''}}
 function base(d){let p=d.split('.'),n=p.length,cc=n>2&&p[n-1].length==2&&/^(co|or|go|ac|in|mi|com|net|org|gov|edu)$/.test(p[n-2]);return p.slice(cc?-3:-2).join('.')}
-async function api(u,ok){try{let r=await fetch(u,{headers:H});if(r.status==401){toast('Password needed');return false}
+async function api(u,ok){try{let r=await fetch(u,{headers:H()});if(denied(r))return false;
 if(!r.ok){toast('Failed ('+r.status+')');return false}if(ok)toast(ok);await load();return await r.text()}catch(e){toast('Box not reachable');return false}}
 function names(){try{return JSON.parse(localStorage.getItem('devnames')||'{}')}catch(e){return{}}}
 function setName(mac,n){let m=names();if(n)m[mac]=n;else delete m[mac];try{localStorage.setItem('devnames',JSON.stringify(m))}catch(e){}}
@@ -148,9 +156,9 @@ let n=e.target.closest('[data-mac]');if(n){let v=prompt('Device name (empty = au
 $('updf').onsubmit=e=>{e.preventDefault();api('/setupdate?u='+encodeURIComponent($('uurl').value.trim())+'&h='+(parseInt($('uiv').value)||24),'Saved')};
 function forgetWifi(){if(confirm('Forget WiFi and restart into setup mode?'))api('/forgetwifi','Restarting')}
 function upload(form,file,url,bar,done){$(form).onsubmit=e=>{e.preventDefault();let f=$(file).files[0];if(!f){toast('Choose a file');return}
-let x=new XMLHttpRequest(),p=$(bar),i=p.firstChild;p.style.display='block';i.style.width='0';x.open('POST',url);x.setRequestHeader('X-Requested-With','esp-adblock');
+let x=new XMLHttpRequest(),p=$(bar),i=p.firstChild;p.style.display='block';i.style.width='0';x.open('POST',url);x.setRequestHeader('X-Pin',PIN);
 x.upload.onprogress=e=>{if(e.lengthComputable)i.style.width=(e.loaded/e.total*100)+'%'};
-x.onload=()=>{p.style.display='none';toast(x.status==200?done:'Failed: '+x.responseText);$(file).value='';setTimeout(load,800)};
+x.onload=()=>{p.style.display='none';if(denied(x))return;toast(x.status==200?done:'Failed: '+x.responseText);$(file).value='';setTimeout(load,800)};
 x.onerror=()=>{p.style.display='none';toast(url=='/update'?done:'Upload failed')};let d=new FormData();d.append('f',f);x.send(d)}}
 upload('upf','blf','/upload','upp','Blocklist updated');upload('fwf','fwb','/update','fwp','Flashed — reload in 20 s');
 const OS=['','Apple device','iPhone','iPad','Mac','Apple TV','Android','Android TV','Windows PC','Linux','Smart TV','PlayStation','Xbox','Nintendo'];
@@ -165,7 +173,7 @@ $('fSeg').onclick=e=>{let b=e.target.closest('button');if(!b)return;flt=b.datase
 $('fDev').onchange=renderLog;
 $('logl').onclick=e=>{let b=e.target.closest('[data-blk]');if(b){let d=b.dataset.blk;if(confirm('Block '+uni(d)+' and its sub-sites?'))api('/addblock?d='+encodeURIComponent(d),'Blocked '+uni(d)).then(loadLog)}
 let a=e.target.closest('[data-alw]');if(a){let d=a.dataset.alw;if(confirm('Always allow '+uni(d)+'?'))api('/allow?d='+encodeURIComponent(d),'Allowed '+uni(d)).then(loadLog)}};
-async function loadLog(){try{let r=await fetch('/log.json',{headers:H,cache:'no-store'});if(r.status==401){$('logl').innerHTML='<div class=empty>Enter the dashboard password to see activity.</div>';return}
+async function loadLog(){try{let r=await fetch('/log.json',{headers:H(),cache:'no-store'});if(denied(r))return;
 LOG=await r.json();renderLog()}catch(e){}}
 function renderLog(){if(!LOG)return;let dv=$('fDev').value,L=LOG.filter(e=>(!dv||e.ip==dv)&&(flt=='all'||e.s>0));
 $('logl').innerHTML=L.map(e=>{let d=(e.t?'\u2026':'')+uni(e.d),bs=base(e.d);
@@ -195,9 +203,11 @@ $('sys').innerHTML=[['Address',s.ip],['WiFi',(s.ssid||'?')+' · '+s.rssi+' dBm']
 ['Uptime',dur(s.up)],['Last restart',s.boot],['Requests',fmt(total)]].map(r=>`<span>${r[0]}</span><span>${esc(r[1])}</span>`).join('');
 $('ustat').textContent=(s.upurl?'Every '+s.upiv+' h · ':'Off · ')+'last: '+(s.upstat||'–');
 if(document.activeElement!=$('uurl'))$('uurl').value=s.upurl||'';if(document.activeElement!=$('uiv'))$('uiv').value=s.upiv||24}
-async function load(){try{let r=await fetch('/stats.json',{cache:'no-store'});S=await r.json();render();
+async function load(){try{let r=await fetch('/stats.json',{headers:H(),cache:'no-store'});if(denied(r))return;if(!r.ok)throw 0;$('lock').classList.remove('on');S=await r.json();render();
 if(!document.body.classList.contains('ready'))setTimeout(()=>document.body.classList.add('ready'),500)}
 catch(e){$('pill').className='pill err';$('pillT').textContent='Offline'}}
+try{PIN=localStorage.getItem('pin')||''}catch(e){}
 try{let t=sessionStorage.getItem('tab');if(t)tab(t)}catch(e){}
-load();setInterval(()=>{if(!document.hidden){load();if(cur=='activity')loadLog()}},3000);
+if(PIN)load();else lock();
+setInterval(()=>{if(!document.hidden&&PIN){load();if(cur=='activity')loadLog()}},3000);
 </script></body></html>)HTML";
