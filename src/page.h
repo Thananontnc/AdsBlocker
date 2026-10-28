@@ -44,7 +44,7 @@ button.r{color:var(--bad)}button.lnk{border:0;background:none;color:var(--mut);p
 .sw input:focus-visible+i{outline:2px solid var(--fg);outline-offset:2px}
 .ck{flex:none;width:44px;text-align:center;color:var(--ok);font-weight:700}
 .tag{font-size:11px;font-weight:600;color:var(--bad);background:var(--badbg);border-radius:6px;padding:1px 6px;margin-left:6px}
-.k1{color:var(--warn)}.k2{color:var(--bad)}
+.k1{color:var(--warn)}.k2,.k3{color:var(--bad)}
 .bar{height:3px;border-radius:9px;background:var(--line);margin-top:7px;overflow:hidden}.bar i{display:block;height:100%;background:var(--bad);opacity:.7}
 form.in{display:flex;gap:8px;padding:14px 0}
 input.tx{flex:1;min-width:0;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg)}
@@ -83,8 +83,9 @@ input[type=file]{font-size:13px;flex:1;min-width:0;width:0;color:var(--mut)}
 <div class=row><span class=ck>&#10003;</span><div class=t>SafeSearch<small>Google, YouTube and Bing</small></div></div>
 <div class=row><label class=sw><input type=checkbox id=tRemote onchange="scamSet('remote',this)"><i></i></label><div class=t>Remote-control apps<small>AnyDesk, TeamViewer and others used by scam callers</small></div></div>
 <div class=row><label class=sw><input type=checkbox id=tBank onchange="scamSet('bank',this)"><i></i></label><div class=t>Fake bank &amp; government sites<small>Copies of Krungthai, SCB, KBank, PromptPay, PEA&hellip;</small></div></div>
+<div class=row><label class=sw><input type=checkbox id=tHacker onchange="scamSet('hacker',this)"><i></i></label><div class=t>Virus &amp; hacker addresses<small>Free addresses that remote-control viruses call home to</small></div></div>
 </div>
-<div id=alertsW style=display:none><div class=lbl>Scams stopped</div><div class=card id=hits></div></div>
+<div id=alertsW style=display:none><div class=lbl>Threats stopped</div><div class=card id=hits></div></div>
 </section>
 
 <section data-tab=activity>
@@ -188,11 +189,11 @@ $('credwarn').style.display=s.defcreds?'block':'none';
 $('nBlocked').textContent=fmt(s.blocked);$('nSub').textContent='requests blocked'+(total?' · '+Math.round(s.blocked*100/total)+'% of traffic':'');
 $('nDev').textContent=s.clients.length;$('nDom').textContent=short(s.domains);$('nUp').textContent=dur(s.up);
 $('pList').textContent=fmt(s.domains)+' sites on the blocklist';
-$('tRemote').checked=!!sc.remote;$('tBank').checked=!!sc.bank;
+$('tRemote').checked=!!sc.remote;$('tBank').checked=!!sc.bank;$('tHacker').checked=sc.hacker!==false;
 let cs=s.clients.slice().sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a.allowed)),ipn=DN={};cs.forEach(c=>DN[c.ip]=nm[c.mac]||c.name||(OS[c.os]?OS[c.os]+' \u00b7 '+c.ip.split('.').pop():c.ip));
 let fd=$('fDev'),fv=fd.value,opts='<option value="">All devices</option>'+cs.map(c=>`<option value="${esc(c.ip)}">${esc(DN[c.ip])}</option>`).join('');if(fd.dataset.o!=opts){fd.innerHTML=opts;fd.value=fv;fd.dataset.o=opts}
 $('alertsW').style.display=sc.hits.length?'':'none';
-$('hits').innerHTML=sc.hits.map(h=>row(esc(uni(h.d)),`<b class=k${h.k}>${h.k==1?'Remote-control app':'Fake bank site'}</b> · ${esc(ipn[h.ip]||h.ip)} · ${ago(h.ago)}`,`<button class="b lnk" data-allow="${esc(base(h.d))}">Allow</button>`)).join('');
+$('hits').innerHTML=sc.hits.map(h=>row(esc(uni(h.d)),`<b class=k${h.k}>${['','Remote-control app','Fake bank site','Possible virus'][h.k]}</b> · ${esc(ipn[h.ip]||h.ip)} · ${ago(h.ago)}${h.n>1?' · '+fmt(h.n)+'\u00d7':''}`,`<button class="b lnk" data-allow="${esc(h.k==3?h.d:base(h.d))}">Allow</button>`)).join('');
 $('devs').innerHTML=cs.map(c=>{let t=c.blocked+c.allowed,pc=t?Math.round(c.blocked*100/t):0,my=nm[c.mac],os=OS[c.os]||'',title=my||c.name||os||c.ip;
 let sub=[title!=os&&os,title!=c.ip&&c.ip,fmt(c.blocked)+' of '+fmt(t)+' blocked'].filter(Boolean).join(' \u00b7 ');
 return`<div class=row>${icon(c.os)}<div class=t><button class=name data-mac="${esc(c.mac)}" data-def="${esc(c.name||'')}">${esc(title)}</button>${c.banned?'<span class=tag>Blocked</span>':''}<small>${esc(sub)}</small><div class=bar><i style="width:${pc}%"></i></div></div>

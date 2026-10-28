@@ -223,11 +223,14 @@ static bool isBlocked(const char* domain) {
 
 // ---------- persistence ----------
 // ---------- scam protection ----------
-// Two built-in checks on top of the blocklist, each with its own dashboard switch:
+// Three built-in checks on top of the blocklist, each with its own dashboard switch:
 //  - remote-control apps: Thai call-center scammers talk victims into installing AnyDesk,
 //    TeamViewer & co. and then empty the bank account through them
 //  - fake bank/government sites: the registered name uses a Thai bank or agency name but
 //    isn't the official site (krungthai-secure.xyz, scb-th.com, pea-refund.net, ...)
+//  - hacker addresses: free dynamic-DNS and tunnel names (x.sytes.net, x.duckdns.org,
+//    x.ngrok.io). Remote-access viruses use them to reach their owner; a PC asking for one
+//    every few seconds is likely infected, so the hit list shows how often it asked.
 // The allow list overrides every block (blocklist, custom, scam) to fix false positives.
 static const char REMOTE_APPS[] PROGMEM =
   "anydesk.com anydesk.de teamviewer.com rustdesk.com airdroid.com airdroid.cn splashtop.com "
@@ -248,13 +251,23 @@ static const char BRAND_OFFICIAL[] PROGMEM =
   "krungthai.com kasikornbank.com bangkokbank.com krungsri.com krungsrionline.com scbeasy.com "
   "ttbbank.com cimbthai.com truemoney.com promptpay.io";
 
+// Only names *under* these are blocked; the services' own sites stay reachable. dyndns.org
+// is left out: home cameras update their address through members.dyndns.org.
+static const char HACKER_HOSTS[] PROGMEM =
+  "sytes.net ddns.net hopto.org zapto.org no-ip.org no-ip.biz no-ip.info myftp.org myftp.biz "
+  "servehttp.com serveftp.com servegame.com servebeer.com serveblog.net servepics.com "
+  "redirectme.net bounceme.net webhop.me myvnc.com ddnsking.com gotdns.ch 3utilities.com "
+  "duckdns.org mooo.com us.to chickenkiller.com crabdance.com jumpingcrab.com ignorelist.com "
+  "strangled.net dynu.net ddnsfree.com freeddns.org mywire.org linkpc.net publicvm.com "
+  "ngrok.io ngrok-free.app ngrok.app trycloudflare.com serveo.net loca.lt portmap.io portmap.host";
+
 static const int MAX_REMOTE = 48;
 static uint64_t remoteHash[MAX_REMOTE]; static int numRemote = 0;
-static bool scamRemoteOn = true, scamBankOn = true;
+static bool scamRemoteOn = true, scamBankOn = true, scamHackerOn = true;
 static uint32_t scamBlocked = 0;
 
 
-struct ScamHit { char d[64]; uint32_t ip, at; uint8_t kind; };   // kind 1 = remote app, 2 = fake brand
+struct ScamHit { char d[64]; uint32_t ip, at; uint8_t kind; uint16_t n; };   // kind 1 = remote app, 2 = fake brand, 3 = hacker address
 static const int MAX_HITS = 10;
 static ScamHit hits[MAX_HITS]; static int numHits = 0;           // hits[0] = newest
 
@@ -321,27 +334,47 @@ static bool fakeBrand(const char* d) {
     return false;
   });
 }
+static bool hackerHost(const char* d) {
+  size_t dl = strlen(d);
+  return anyWord(HACKER_HOSTS, [&](const char* w) {
+    size_t wl = strlen(w);
+    if (dl <= wl + 1 || d[dl - wl - 1] != '.' || strcmp(d + dl - wl, w) != 0) return false;
+    return !(dl == wl + 4 && strncmp(d, "www.", 4) == 0);   // www.duckdns.org etc. is the service itself
+  });
+}
 static uint8_t scamKind(const char* d) {
   if (scamRemoteOn && suffixIn(d, remoteHash, numRemote)) return 1;
   if (scamBankOn && fakeBrand(d)) return 2;
+  if (scamHackerOn && hackerHost(d)) return 3;
   return 0;
 }
 static void recordHit(const char* d, uint32_t ip, uint8_t kind) {
   scamBlocked++;
-  if (numHits && hits[0].ip == ip && strncmp(hits[0].d, d, sizeof(hits[0].d) - 1) == 0) { hits[0].at = millis(); return; }
-  if (numHits < MAX_HITS) numHits++;
-  for (int i = numHits - 1; i > 0; i--) hits[i] = hits[i - 1];
-  strncpy(hits[0].d, d, sizeof(hits[0].d) - 1); hits[0].d[sizeof(hits[0].d) - 1] = 0;
-  hits[0].ip = ip; hits[0].at = millis(); hits[0].kind = kind;
+  // A repeat moves to the top with its count, so a virus calling home every few
+  // seconds stays visible instead of filling the list.
+  int i = 0;
+  while (i < numHits && !(hits[i].ip == ip && strncmp(hits[i].d, d, sizeof(hits[i].d) - 1) == 0)) i++;
+  ScamHit h = i < numHits ? hits[i] : ScamHit{};
+  if (i == numHits) {
+    if (numHits < MAX_HITS) numHits++;
+    i = numHits - 1;
+    strncpy(h.d, d, sizeof(h.d) - 1); h.d[sizeof(h.d) - 1] = 0; h.ip = ip; h.kind = kind;
+  }
+  for (; i > 0; i--) hits[i] = hits[i - 1];
+  if (h.n < 0xFFFF) h.n++;
+  h.at = millis(); hits[0] = h;
 }
 
 static void loadScam() {
   numRemote = 0;
   anyWord(REMOTE_APPS, [](const char* w) { if (numRemote < MAX_REMOTE) remoteHash[numRemote++] = fnv40(w, strlen(w)); return false; });
   File f = LittleFS.open("/scam.cfg", "r");
-  if (f) { scamRemoteOn = f.readStringUntil('\n').toInt() != 0; scamBankOn = f.readStringUntil('\n').toInt() != 0; f.close(); }
+  if (!f) return;
+  scamRemoteOn = f.readStringUntil('\n').toInt() != 0; scamBankOn = f.readStringUntil('\n').toInt() != 0;
+  String h = f.readStringUntil('\n'); if (h.length()) scamHackerOn = h.toInt() != 0;   // older files have 2 lines
+  f.close();
 }
-static void saveScam() { File f = LittleFS.open("/scam.cfg", "w"); if (!f) return; f.println(scamRemoteOn ? 1 : 0); f.println(scamBankOn ? 1 : 0); f.close(); }
+static void saveScam() { File f = LittleFS.open("/scam.cfg", "w"); if (!f) return; f.println(scamRemoteOn ? 1 : 0); f.println(scamBankOn ? 1 : 0); f.println(scamHackerOn ? 1 : 0); f.close(); }
 static bool addAllow(const String& d) { customList.remove(d); return allowList.add(d); }   // allowing beats an older custom block
 
 static bool isBannedIP(uint32_t ip) { for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) return true; return false; }
@@ -677,12 +710,13 @@ static void handleStats() {
   J("],\"allow\":[");  allowList.each([&](const char* d) { if (!first) J(","); first = false; o.str(d); });
   J("],\"scam\":{\"remote\":"); o.boolean(scamRemoteOn);
   J(",\"bank\":"); o.boolean(scamBankOn);
+  J(",\"hacker\":"); o.boolean(scamHackerOn);
   J(",\"blocked\":"); o.unum(scamBlocked);
   J(",\"hits\":[");
   for (int i = 0; i < numHits; i++) {
     if (i) J(",");
     J("{\"d\":"); o.str(hits[i].d); J(",\"ip\":"); o.ip(hits[i].ip);
-    J(",\"k\":"); o.unum(hits[i].kind); J(",\"ago\":"); o.unum((millis() - hits[i].at) / 1000); J("}");
+    J(",\"k\":"); o.unum(hits[i].kind); J(",\"n\":"); o.unum(hits[i].n); J(",\"ago\":"); o.unum((millis() - hits[i].at) / 1000); J("}");
   }
   J("]}}");
   o.flush();
@@ -1030,10 +1064,11 @@ void setup() {
   web.on("/unblock", []() { if (!requireAuth()) return; customList.remove(web.arg("d")); web.send_P(200, PSTR("text/plain"), PSTR("ok")); });
   web.on("/allow", []() { if (!requireAuth()) return; addAllow(web.arg("d")); web.send_P(200, PSTR("text/plain"), PSTR("ok")); });
   web.on("/unallow", []() { if (!requireAuth()) return; allowList.remove(web.arg("d")); web.send_P(200, PSTR("text/plain"), PSTR("ok")); });
-  web.on("/scamset", []() {                  // /scamset?remote=0|1&bank=0|1
+  web.on("/scamset", []() {                  // /scamset?remote=0|1&bank=0|1&hacker=0|1
     if (!requireAuth()) return;
     if (web.hasArg("remote")) scamRemoteOn = web.arg("remote") == "1";
     if (web.hasArg("bank"))   scamBankOn   = web.arg("bank") == "1";
+    if (web.hasArg("hacker")) scamHackerOn = web.arg("hacker") == "1";
     saveScam(); web.send_P(200, PSTR("text/plain"), PSTR("ok"));
   });
   web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)

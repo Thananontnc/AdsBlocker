@@ -69,7 +69,7 @@ strict search** (`safeSearchIP()` in `src/main.cpp`).
 
 ## Scam protection
 
-Two built-in checks on top of the blocklist, each with its own switch on the dashboard:
+Three built-in checks on top of the blocklist, each with its own switch on the dashboard:
 
 - **Remote-control apps:** AnyDesk, TeamViewer, RustDesk, AirDroid, UltraViewer, ToDesk,
   Chrome Remote Desktop, Quick Assist and others. Thai call-center scammers ("police",
@@ -80,10 +80,19 @@ Two built-in checks on top of the blocklist, each with its own switch on the das
   TrueMoney, PEA/MEA/PWA, Thailand Post, DSI, SSO...) but isn't the official site, e.g.
   `krungthai-secure.xyz`, `scb-th.com`, `krungthai.co.th.login-secure.com`. Sites under
   `.go.th`, `.or.th`, `.co.th`, `.ac.th` and `.mi.th` are THNIC-verified and never flagged.
+- **Virus & hacker addresses:** names under free dynamic-DNS and tunnel services (No-IP's
+  `sytes.net`/`ddns.net`/`hopto.org`..., DuckDNS, FreeDNS, Dynu, ngrok, Cloudflare quick
+  tunnels). Remote-access viruses (njRAT, AsyncRAT, Remcos...) use them to reach their
+  owner. The services' own sites stay reachable, and `dyndns.org` isn't listed because
+  home cameras update their address through it. If a camera or NAS at home uses one of
+  these names, add it under **Always allowed**.
 
-The dashboard lists recent hits with the device that tried them. **Always allowed** sites
+  A device that shows up here again and again (the hit counts up, e.g. `compaq.sytes.net ·
+  Windows PC · 2,400×`) is probably infected: run a full antivirus scan on it.
+
+The dashboard lists the last 10 threats with the device that tried them and how often. **Always allowed** sites
 override every block (blocklist, custom and scam checks), which fixes false positives.
-The lists live in `REMOTE_APPS`, `BRAND_PARTS`, `BRAND_WORDS` and `BRAND_OFFICIAL` in
+The lists live in `REMOTE_APPS`, `BRAND_PARTS`, `BRAND_WORDS`, `BRAND_OFFICIAL` and `HACKER_HOSTS` in
 `src/main.cpp`.
 
 ## Dashboard
