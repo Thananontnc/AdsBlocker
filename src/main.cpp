@@ -400,7 +400,12 @@ static void getMac(uint32_t ip, uint8_t* mac) {
 }
 static void noteNewDevice(uint32_t ip);
 static Dev* getClient(uint32_t ip) {
-  for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) return &clients[i];
+  for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) {
+    // A device's first lookup can arrive before its ARP entry exists: retry until known.
+    Dev* c = &clients[i];
+    if (!(c->mac[0] | c->mac[1] | c->mac[2] | c->mac[3] | c->mac[4] | c->mac[5])) getMac(ip, c->mac);
+    return c;
+  }
   if (numClients < MAX_CLIENTS) {
     Dev* c = &clients[numClients++];
     c->ip = ip; c->blocked = c->allowed = 0; c->banned = isBannedIP(ip); c->os = 0;

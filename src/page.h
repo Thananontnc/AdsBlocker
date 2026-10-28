@@ -136,7 +136,9 @@ function toHost(v){v=v.trim();if(!v)return'';if(!/^[a-z][a-z0-9+.-]*:\/\//i.test
 function base(d){let p=d.split('.'),n=p.length,cc=n>2&&p[n-1].length==2&&/^(co|or|go|ac|in|mi|com|net|org|gov|edu)$/.test(p[n-2]);return p.slice(cc?-3:-2).join('.')}
 async function api(u,ok){try{let r=await fetch(u,{headers:H()});if(denied(r))return false;
 if(!r.ok){toast('Failed ('+r.status+')');return false}if(ok)toast(ok);await load();return await r.text()}catch(e){toast('Box not reachable');return false}}
-function names(){try{return JSON.parse(localStorage.getItem('devnames')||'{}')}catch(e){return{}}}
+function names(){try{let m=JSON.parse(localStorage.getItem('devnames')||'{}');delete m[Z];return m}catch(e){return{}}}
+// Names are keyed by MAC; until the box knows a device's MAC (all zeros) they're keyed by IP.
+const Z='00:00:00:00:00:00',key=c=>c.mac==Z?c.ip:c.mac;
 function setName(mac,n){let m=names();if(n)m[mac]=n;else delete m[mac];try{localStorage.setItem('devnames',JSON.stringify(m))}catch(e){}}
 function tab(t){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t==t));
 document.querySelectorAll('section[data-tab]').forEach(s=>s.classList.toggle('on',s.dataset.tab==t));cur=t;try{sessionStorage.setItem('tab',t)}catch(e){}if(t=='activity')loadLog()}
@@ -190,13 +192,13 @@ $('nBlocked').textContent=fmt(s.blocked);$('nSub').textContent='requests blocked
 $('nDev').textContent=s.clients.length;$('nDom').textContent=short(s.domains);$('nUp').textContent=dur(s.up);
 $('pList').textContent=fmt(s.domains)+' sites on the blocklist';
 $('tRemote').checked=!!sc.remote;$('tBank').checked=!!sc.bank;$('tHacker').checked=sc.hacker!==false;
-let cs=s.clients.slice().sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a.allowed)),ipn=DN={};cs.forEach(c=>DN[c.ip]=nm[c.mac]||c.name||(OS[c.os]?OS[c.os]+' \u00b7 '+c.ip.split('.').pop():c.ip));
+let cs=s.clients.slice().sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a.allowed)),ipn=DN={};cs.forEach(c=>DN[c.ip]=nm[key(c)]||c.name||(OS[c.os]?OS[c.os]+' \u00b7 '+c.ip.split('.').pop():c.ip));
 let fd=$('fDev'),fv=fd.value,opts='<option value="">All devices</option>'+cs.map(c=>`<option value="${esc(c.ip)}">${esc(DN[c.ip])}</option>`).join('');if(fd.dataset.o!=opts){fd.innerHTML=opts;fd.value=fv;fd.dataset.o=opts}
 $('alertsW').style.display=sc.hits.length?'':'none';
 $('hits').innerHTML=sc.hits.map(h=>row(esc(uni(h.d)),`<b class=k${h.k}>${['','Remote-control app','Fake bank site','Possible virus'][h.k]}</b> · ${esc(ipn[h.ip]||h.ip)} · ${ago(h.ago)}${h.n>1?' · '+fmt(h.n)+'\u00d7':''}`,`<button class="b lnk" data-allow="${esc(h.k==3?h.d:base(h.d))}">Allow</button>`)).join('');
-$('devs').innerHTML=cs.map(c=>{let t=c.blocked+c.allowed,pc=t?Math.round(c.blocked*100/t):0,my=nm[c.mac],os=OS[c.os]||'',title=my||c.name||os||c.ip;
+$('devs').innerHTML=cs.map(c=>{let t=c.blocked+c.allowed,pc=t?Math.round(c.blocked*100/t):0,my=nm[key(c)],os=OS[c.os]||'',title=my||c.name||os||c.ip;
 let sub=[title!=os&&os,title!=c.ip&&c.ip,fmt(c.blocked)+' of '+fmt(t)+' blocked'].filter(Boolean).join(' \u00b7 ');
-return`<div class=row>${icon(c.os)}<div class=t><button class=name data-mac="${esc(c.mac)}" data-def="${esc(c.name||'')}">${esc(title)}</button>${c.banned?'<span class=tag>Blocked</span>':''}<small>${esc(sub)}</small><div class=bar><i style="width:${pc}%"></i></div></div>
+return`<div class=row>${icon(c.os)}<div class=t><button class=name data-mac="${esc(key(c))}" data-def="${esc(c.name||'')}">${esc(title)}</button>${c.banned?'<span class=tag>Blocked</span>':''}<small>${esc(sub)}</small><div class=bar><i style="width:${pc}%"></i></div></div>
 <button class="b${c.banned?'':' lnk'}" data-ip="${esc(c.ip)}" data-ban="${c.banned?1:0}">${c.banned?'Unblock':'Block'}</button></div>`}).join('')||'<div class=empty>No devices yet. Set your router\'s DNS to '+esc(s.ip)+'.</div>';
 let L=s[list]||[];[...$('sseg').children].forEach(b=>b.textContent=(b.dataset.s=='custom'?'Blocked':'Always allowed')+' '+(s[b.dataset.s]||[]).length);
 $('slist').innerHTML=L.map(d=>row(esc(uni(d)),uni(d)!=d?esc(d):'',`<button class="b lnk" data-rm="${esc(d)}">Remove</button>`)).join('')||'<div class=empty>Nothing here yet.</div>';
